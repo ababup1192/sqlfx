@@ -1,0 +1,15 @@
+# 層 5 のテスト（実 PostgreSQL）用。`make db-up` で起動し、`make test-pg` が接続する。
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: flix_db
+      POSTGRES_USER: flix
+      POSTGRES_PASSWORD: flix
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flix -d flix_db"]
+      interval: 2s
+      timeout: 2s
+      retries: 15

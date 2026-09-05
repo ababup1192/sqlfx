@@ -1,0 +1,9 @@
+[package]
+name        = "flix_db"
+description = "Flix の PostgreSQL 向け DB ライブラリ。SQL を抽象せず、クエリの間にエフェクトで型を付ける"
+version     = "0.1.0"
+flix        = "0.75.3"
+authors     = ["abab <ababup1192@gmail.com>"]
+
+[mvn-dependencies]
+"org.postgresql:postgresql" = "42.7.4"

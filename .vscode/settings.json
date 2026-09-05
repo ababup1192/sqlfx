@@ -1,0 +1,4 @@
+{
+  // bin/flix と同じフラグ。無いと純粋なラムダが `\ ef` の関数型に広がらず、LSP が大量のエラーを出す
+  "flix.extraFlixArgs": "--Xsubeffecting=lambdas"
+}
