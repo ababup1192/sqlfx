@@ -170,8 +170,8 @@ def testPgMoreTypesRoundTrip(): Unit \ {Assert, IO} =
 ///   TIMESTAMPTZ '2026-09-06T01:00:00Z' / DATE '2026-09-06' / UUID / JSONB '{"n": 1}' → 同じ値で返る
 @Test
 def testPgSemanticTypesRoundTrip(): Unit \ {Assert, IO} =
-    let at = Timestamp.fromIso8601("2026-09-06T01:00:00.123456Z") |> Option.getWithDefault(Timestamp.fromEpochMicros(0i64));
-    let day = Date.fromIso8601("2026-09-06") |> Option.getWithDefault(Date.fromEpochDay(0));
+    let at = Timestamp.at("2026-09-06T01:00:00.123456Z");
+    let day = Date.at("2026-09-06");
     let key = Uuid.fromString("550e8400-e29b-41d4-a716-446655440000") |> Option.getWithDefault(Uuid.Uuid(""));
     let meta = Util.Json.Json.JObject(Map#{"n" => Util.Json.Json.JNumber(1ff)});
     let decoder = forA (

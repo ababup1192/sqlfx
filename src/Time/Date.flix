@@ -52,11 +52,22 @@ mod Date {
             case _: DateTimeException => None
         })
 
+    ///
+    /// リテラル用。`yyyy-MM-dd` でなければ bug!。
+    ///
+    pub def at(iso: String): Date = match fromIso8601(iso) {
+        case Some(d) => d
+        case None => bug!("Date.at: not yyyy-MM-dd: ${iso}")
+    }
+
     pub def toIso8601(d: Date): String = format(Format.iso8601Date(), d)
 
     pub def plusDays(n: Int32, d: Date): Date = Date.Date(toEpochDay(d) + n)
 
-    pub def daysBetween(earlier: Date, later: Date): Int32 = toEpochDay(later) - toEpochDay(earlier)
+    ///
+    /// `start` から `end` までの日数。`end` が前なら負。
+    ///
+    pub def daysBetween(start: {start = Date}, end: {end = Date}): Int32 = toEpochDay(end#end) - toEpochDay(start#start)
 
     ///
     /// 表示。時刻とゾーンのトークンは空文字になる。

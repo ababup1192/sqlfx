@@ -79,7 +79,7 @@ mod MigrateCli {
         }
 
     def describe(status: Status): String = match status {
-        case Status.Applied(version, _, ms) => "applied  ${version}  (${ms} ms)"
+        case Status.Applied(version, at, ms) => "applied  ${version}  ${Timestamp.toIso8601(at)}  (${ms} ms)"
         case Status.Pending(version) => "pending  ${version}"
     }
 

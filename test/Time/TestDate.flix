@@ -24,7 +24,7 @@ def testFromYmd(): Unit \ Assert =
 /// ISO 8601 の往復と toYmd。
 @Test
 def testIso8601AndYmd(): Unit \ Assert =
-    let d = Date.fromIso8601("2026-09-06") |> Option.getWithDefault(Date.fromEpochDay(0));
+    let d = Date.at("2026-09-06");
     let ymd = Date.toYmd(d);
     Assert.assertEq(
         expected = ("2026-09-06", (2026, 9, 6), None, 20702),
@@ -33,10 +33,10 @@ def testIso8601AndYmd(): Unit \ Assert =
 /// 日数の加算と差、曜日（2026-09-06 は日曜 = 7）。
 @Test
 def testDayArithmetic(): Unit \ Assert =
-    let d = Date.fromIso8601("2026-09-06") |> Option.getWithDefault(Date.fromEpochDay(0));
+    let d = Date.at("2026-09-06");
     Assert.assertEq(
         expected = ("2026-10-06", 30, 7, "September 6, 2026 (Sunday)"),
         (Date.toIso8601(d |> Date.plusDays(30)),
-         Date.daysBetween(d, d |> Date.plusDays(30)),
+         Date.daysBetween(start = d, end = d |> Date.plusDays(30)),
          Date.weekday(d),
          Date.format(Format.pattern("MMMM d, yyyy (EEEE)"), d)))

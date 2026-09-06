@@ -336,6 +336,7 @@ PostsTable.publishedAt() <<= Fragment.value(Timestamp.now())          // 断片 
 Timestamp.format(Format.iso8601Minute(), row#createdAt)               // "2026-09-06 10:00"。\ TimeZone
 Timestamp.toCivil(row#createdAt)#date                                 // その地域の暦日。\ TimeZone
 Date.fromYmd({ year = 2026, month = 2, day = 30 })                    // None。存在しない日は作れない
+Timestamp.at("2026-09-06T01:00:00Z")                                  // リテラル用。形が違えば bug!
 
 run { render(posts) } with TimeZone.runWith(zone)                     // 境界で 1 回。zone は Zone.fromName("Asia/Tokyo") で作る
 run { Blog.publishDue() } with TimeTest.runFrozen({ now = "2026-09-06T00:00:00Z", zone = Zone.utc() })   // テストで時刻とゾーンを止める

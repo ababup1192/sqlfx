@@ -7,16 +7,13 @@ mod TimeTest {
     use Time.Clock
 
     ///
-    /// - `now`: ISO 8601 の瞬間。形が違えば bug!
+    /// - `now`: ISO 8601 の瞬間。形が違えば bug!（`Timestamp.at`）
     /// - `zone`: 暦のゾーン
     ///
     pub type alias Frozen = { now = String, zone = Zone.Zone }
 
     pub def runFrozen(frozen: Frozen, thunk: Unit -> a \ ef): a \ ef - {Clock, TimeZone} =
-        let micros = match Timestamp.fromIso8601(frozen#now) {
-            case Some(t) => Timestamp.toEpochMicros(t)
-            case None => bug!("TimeTest.runFrozen: not ISO 8601: ${frozen#now}")
-        };
+        let micros = Timestamp.toEpochMicros(Timestamp.at(frozen#now));
         run {
             thunk()
         } with handler Clock {

@@ -58,6 +58,14 @@ mod Timestamp {
         })
 
     ///
+    /// リテラル用。ISO 8601 でなければ bug!。テストや seed のように、値がコードに書いてある所で使う。
+    ///
+    pub def at(iso: String): Timestamp = match fromIso8601(iso) {
+        case Some(t) => t
+        case None => bug!("Timestamp.at: not ISO 8601: ${iso}")
+    }
+
+    ///
     /// UTC の ISO 8601。秒未満は 0 でなければマイクロ秒まで出す。
     ///
     pub def toIso8601(t: Timestamp): String =
@@ -68,8 +76,11 @@ mod Timestamp {
 
     pub def minus(d: Time.Duration, t: Timestamp): Timestamp = Timestamp.Timestamp(toEpochMicros(t) - Time.Duration.toMicros(d))
 
-    pub def between(earlier: Timestamp, later: Timestamp): Time.Duration =
-        Time.Duration.nanoseconds((toEpochMicros(later) - toEpochMicros(earlier)) * 1000i64)
+    ///
+    /// `start` から `end` までの長さ。`end` が前なら負。
+    ///
+    pub def between(start: {start = Timestamp}, end: {end = Timestamp}): Time.Duration =
+        Time.Duration.nanoseconds((toEpochMicros(end#end) - toEpochMicros(start#start)) * 1000i64)
 
     // ---- 時計 ----
 
