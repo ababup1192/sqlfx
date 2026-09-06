@@ -1,7 +1,7 @@
 [package]
 name        = "sqlfx"
 description = "Flix の PostgreSQL 向け DB ライブラリ。SQL を抽象せず、クエリの間にエフェクトで型を付ける"
-version     = "0.1.1"
+version     = "0.1.2"
 flix        = "0.75.3"
 authors     = ["abab <ababup1192@gmail.com>"]
 
