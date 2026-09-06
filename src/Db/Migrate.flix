@@ -26,6 +26,8 @@ mod Migrate {
         def missingFile(version: String): Void
         /// `NNN_name.sql` の形でない
         def invalidFileName(name: String): Void
+        /// 同じ番号のファイルが 2 つ以上ある（ブランチのマージで起きる）
+        def duplicateNumber(names: List[String]): Void
         /// check で未適用が残っている
         def pending(versions: List[String]): Void
     }
@@ -131,20 +133,22 @@ mod Migrate {
             def checksumMismatch(version, _resume) = Err("checksum mismatch: ${version}")
             def missingFile(version, _resume) = Err("missing file: ${version}")
             def invalidFileName(name, _resume) = Err("invalid file name: ${name} (expected NNN_name.sql)")
+            def duplicateNumber(names, _resume) = Err("duplicate number: ${List.join(", ", names)}")
             def pending(versions, _resume) = Err("pending: ${List.join(", ", versions)}")
         }
 
     // ---- ファイル ----
 
     ///
-    /// ディレクトリ直下の .sql を名前順に読む。形式が違う名前が 1 つでもあれば invalidFileName。
+    /// ディレクトリ直下の .sql を名前順に読む。形式が違う名前が 1 つでもあれば invalidFileName、番号が重なれば duplicateNumber。
     ///
     def loadFiles(dir: String): List[MigrationFile] \ {IO, Fs.ReadFile.ReadFile, Fs.DirList.DirList, DbErr, MigrateErr} =
-        let names = match Fs.DirList.list(dir) {
-            case Ok(entries) => entries |> List.filter(name -> String.endsWith(suffix = ".sql", name)) |> List.sort
-            case Err(e) => DbErr.other("cannot list ${dir}: ${e}")
-        };
+        let names = listSqlFiles(dir);
         List.forEach(name -> if (isValidFileName(name)) () else MigrateErr.invalidFileName(name), names);
+        match duplicateNumbers(names) {
+            case Nil => ()
+            case duplicates :: _ => MigrateErr.duplicateNumber(duplicates)
+        };
         List.map(name -> {
             let sql = match Fs.ReadFile.read("${dir}/${name}") {
                 case Ok(text) => text
@@ -152,6 +156,51 @@ mod Migrate {
             };
             { version = name, sql = sql, checksum = checksum(sql), noTransaction = hasNoTransactionMarker(sql) }
         }, names)
+
+    ///
+    /// ディレクトリ直下の .sql を名前順に。
+    ///
+    pub def listSqlFiles(dir: String): List[String] \ {Fs.DirList.DirList, DbErr} =
+        match Fs.DirList.list(dir) {
+            case Ok(entries) => entries |> List.filter(name -> String.endsWith(suffix = ".sql", name)) |> List.sort
+            case Err(e) => DbErr.other("cannot list ${dir}: ${e}")
+        }
+
+    ///
+    /// 同じ番号を持つファイル名の組。`001_a.sql` と `0001_b.sql` は同じ番号。形式が違う名前は見ない。重なりが無ければ Nil。
+    ///
+    pub def duplicateNumbers(names: List[String]): List[List[String]] =
+        names
+            |> List.filter(isValidFileName)
+            |> List.groupBy(numberOf)
+            |> List.map(Nel.toList)
+            |> List.filter(group -> List.length(group) > 1)
+            |> List.map(List.sort)
+            |> List.sort
+
+    ///
+    /// 次のファイル名。今ある最大の番号 + 1 を 3 桁のゼロ埋めで付ける。空なら 001。
+    ///
+    pub def nextFileName(names: List[String], name: String): String =
+        let next = names |> List.filterMap(numberOf) |> List.maximum |> Option.getWithDefault(0) |> (n -> n + 1);
+        "${String.padLeft(3, '0', "${next}")}_${name}.sql"
+
+    ///
+    /// `migrate new` に渡す名前。小文字・数字・`_` だけで、先頭は小文字。
+    ///
+    pub def isValidMigrationName(name: String): Bool =
+        String.forAll(c -> isLowerAscii(c) or Char.isDigit(c) or c == '_', name)
+            and (String.toList(name) |> List.head |> Option.map(isLowerAscii) |> Option.getWithDefault(false))
+
+    def isLowerAscii(c: Char): Bool = c >= 'a' and c <= 'z'
+
+    ///
+    /// 先頭の `NNN` を数として。形式が違えば None。
+    ///
+    def numberOf(name: String): Option[Int32] =
+        if (isValidFileName(name))
+            String.indexOf(substr = "_", name) |> Option.flatMap(underscore -> String.takeLeft(underscore, name) |> Int32.fromString)
+        else None
 
     ///
     /// `NNN_name.sql`。番号は 3 桁以上のゼロ埋め。文字列順で並べても番号順になるように形を固定する。

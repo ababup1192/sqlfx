@@ -59,6 +59,13 @@ def testMigrateRejectsBadFileName(): Unit \ {Assert, IO} =
     let result = runMigrate(() -> Migrate.apply(Migrate.defaultConfig(pgConfig()), "test/fixtures/bad_migrations"));
     Assert.assertEq(expected = Err("invalid file name: 1_short.sql (expected NNN_name.sql)"), result)
 
+/// 同じ番号のファイルが 2 つあれば、何も当てずに duplicateNumber。
+@Test
+def testMigrateRejectsDuplicateNumber(): Unit \ {Assert, IO} =
+    resetMigrations();
+    let result = runMigrate(() -> Migrate.apply(Migrate.defaultConfig(pgConfig()), "test/fixtures/dup_migrations"));
+    Assert.assertEq(expected = Err("duplicate number: 002_a.sql, 002_b.sql"), result)
+
 /// 途中のファイルが失敗すると、そのファイルは記録されず後続も当たらない。前のファイルは残る。
 ///
 ///   001 OK / 002 を壊す（存在しない表への ALTER）→ 002 と 003 は未適用のまま

@@ -2,6 +2,7 @@
 /// `bin/flix run -- gen <migrations/> <queries/> <out/>`: migrations でスキーマを組み、queries の .q から Flix を生成する。
 /// `gen --check ...` は書かずに、生成物が最新かだけを確かめる（CI 用。古ければ終了コード 1）。
 /// `migrate [--check | --status] <migrations/>`: migrations を DB に当てる。接続先は環境変数 SQLFX_DSN / SQLFX_USER / SQLFX_PASSWORD。
+/// `migrate new <migrations/> <name>`: 次の番号でファイルを作る（DB は使わない）。
 /// 生成器を別プロジェクトにしないのは、flix.toml にローカルパス依存が無いから（PLAN フェーズ 2-3）。
 ///
 def main(): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.FileRead.FileRead, Fs.FileWrite.FileWrite} =
@@ -12,9 +13,11 @@ def main(): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.FileR
             case "migrate" :: migrationsDir :: Nil => MigrateCli.applyAll(migrationsDir)
             case "migrate" :: "--check" :: migrationsDir :: Nil => MigrateCli.checkAll(migrationsDir)
             case "migrate" :: "--status" :: migrationsDir :: Nil => MigrateCli.showStatus(migrationsDir)
+            case "migrate" :: "new" :: migrationsDir :: name :: Nil => MigrateCli.newFile(migrationsDir, name)
             case _ => {
                 println("usage: bin/flix run -- gen [--check] <migrations dir> <queries dir> <out dir>");
                 println("       bin/flix run -- migrate [--check | --status] <migrations dir>   (SQLFX_DSN / SQLFX_USER / SQLFX_PASSWORD)");
+                println("       bin/flix run -- migrate new <migrations dir> <name>");
                 Sys.Exit.exit(2)
             }
         }
@@ -53,6 +56,26 @@ mod MigrateCli {
         match runToResult(() -> Jdbc.withConnection(connectionFromEnv(), conn -> Migrate.status(conn, dir))) {
             case Ok(statuses) => List.forEach(status -> println(describe(status)), statuses)
             case Err(message) => { println("error: ${message}"); Sys.Exit.exit(1) }
+        }
+
+    ///
+    /// 今ある最大の番号 + 1 で `NNN_name.sql` を作る。名前は小文字・数字・`_` だけ。
+    ///
+    pub def newFile(dir: String, name: String): Unit \ {IO, Sys.Exit.Exit, Fs.DirList.DirList, Fs.WriteFile.WriteFile} =
+        if (not Migrate.isValidMigrationName(name)) {
+            println("error: invalid name: ${name} (lowercase letters, digits and _ only)");
+            Sys.Exit.exit(1)
+        } else {
+            match DbError.runWithFailure(() -> Migrate.listSqlFiles(dir)) {
+                case Err(failure) => { println("error: ${failure}"); Sys.Exit.exit(1) }
+                case Ok(names) => {
+                    let path = "${dir}/${Migrate.nextFileName(names, name)}";
+                    match Fs.WriteFile.write(str = "-- ${name}\n", path) {
+                        case Ok(()) => println("wrote ${path}")
+                        case Err(e) => { println("error: cannot write ${path}: ${e}"); Sys.Exit.exit(1) }
+                    }
+                }
+            }
         }
 
     def describe(status: Status): String = match status {

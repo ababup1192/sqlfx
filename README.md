@@ -364,16 +364,18 @@ $ SQLFX_DSN=jdbc:postgresql://127.0.0.1:5432/blog SQLFX_USER=flix SQLFX_PASSWORD
     bin/flix run -- migrate migrations/            # 未適用を番号順に当てる
     bin/flix run -- migrate --check migrations/    # 未適用・不一致・欠落があれば exit 1（CI と起動前）
     bin/flix run -- migrate --status migrations/   # 一覧
+$ bin/flix run -- migrate new migrations/ add_note   # 次の番号で 004_add_note.sql を作る（DB は使わない）
 ```
 
 - ファイル名は `NNN_name.sql`（3 桁以上のゼロ埋め）。文字列順で並べても番号順になる形に固定する。記録に無いファイルは番号が小さくても当てる（ブランチのマージで割り込む）
+- 同じ番号のファイルが 2 つあれば `duplicateNumber` で止まる（マージで両方が 004 になった時）。どちらかを `migrate new` で振り直す
 - 1 ファイル 1 Tx。全文と記録の INSERT を同じ Tx に入れるので「当たったのに記録が無い」は起きない。途中で失敗したらそのファイルと後続は未適用のまま
 - 先頭行が `-- sqlfx:no-transaction` のファイルは Tx 無し（`CREATE INDEX CONCURRENTLY` 用）。1 文だけにし、`IF NOT EXISTS` で冪等に書く
 - 適用済みのファイルが書き換わっていれば `checksumMismatch` で止まる（CRLF、行末の空白、末尾の空行は無視）。記録にあるがファイルが無ければ `missingFile`
 - 専用の接続を 1 本開き、`SET lock_timeout`（既定 10 秒）と `pg_advisory_lock` を取ってから当てる。複数台が同時に走っても 1 つずつ。プールの接続は使わない
 
 アプリからは `Migrate.apply(Migrate.defaultConfig(config), "migrations")` と `Migrate.check(conn, "migrations")`。推奨は「デプロイの手順で apply、起動時に check」。
-失敗は `DbErr` と `MigrateErr`（`checksumMismatch` / `missingFile` / `invalidFileName` / `pending`）で型に出る。境界では `Migrate.runWithResult`。
+失敗は `DbErr` と `MigrateErr`（`checksumMismatch` / `missingFile` / `invalidFileName` / `duplicateNumber` / `pending`）で型に出る。境界では `Migrate.runWithResult`。
 
 ## 8. Tx と再実行
 

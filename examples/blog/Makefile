@@ -1,4 +1,4 @@
-.PHONY: vendor gen gen-check migrate migrate-check migrate-status check test test-unit test-pg db-up db-down
+.PHONY: vendor gen gen-check migrate migrate-check migrate-status migrate-new check test test-unit test-pg db-up db-down
 
 FLIX = ../../bin/flix
 COMPOSE = docker compose -f ../../docker-compose.yml
@@ -27,6 +27,9 @@ migrate-check:
 
 migrate-status:
 	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate --status examples/blog/migrations
+
+migrate-new:   # make migrate-new NAME=add_note
+	cd ../.. && bin/flix run -- migrate new examples/blog/migrations $(NAME)
 
 check: vendor
 	$(FLIX) check
