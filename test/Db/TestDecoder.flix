@@ -141,3 +141,16 @@ def testSelectExprAndDedupe(): Unit \ Assert =
     Assert.assertEq(
         expected = (List#{"count(*)::bigint AS total"}, Ok(3i64), List#{"id"}),
         (Decoder.selectList(count), Decoder.decodeRow(count, row), Decoder.selectList(twice)))
+
+/// attempt: 型違いは Err の値として残り行は落ちない。NULL と列が無いのは握らず、今まで通り落ちる。
+///
+///   views = "x"（型違い）→ Ok(Err(TypeMismatch)) / views = NULL → Err(UnexpectedNull) / 列無し → Err(MissingColumn)
+@Test
+def testRecoverKeepsTypeMismatchAsValue(): Unit \ Assert =
+    let broken = Row.makeRows(List#{"views"}, List#{List#{SqlValue.Str("x")}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let nulled = Row.makeRows(List#{"views"}, List#{List#{SqlValue.Null}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let missing = Row.makeRows(List#{"other"}, List#{List#{SqlValue.Int32(1)}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let decoder = Decoder.attempt(Decoder.int32("views"));
+    Assert.assertEq(
+        expected = (Ok(Err(DecodeError.TypeMismatch("views", "Int32", "Str"))), Err(DecodeError.UnexpectedNull("views")), Err(DecodeError.MissingColumn("views"))),
+        (Decoder.decodeRow(decoder, broken), Decoder.decodeRow(decoder, nulled), Decoder.decodeRow(decoder, missing)))

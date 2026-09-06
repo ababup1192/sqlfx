@@ -292,36 +292,78 @@ DB のエラーは 2 つのエフェクト。どちらの op も戻らない（`
 ```
 TransientDbErr   deadlock / timeout / connectionLost         再実行で直りうる → withRetry
 DbErr            uniqueViolation / foreignKeyViolation /      直らない
+                 checkViolation / notNullViolation /
                  schemaMismatch / decodeError / retryExhausted / other
 ```
 
-拾いたい所でだけ拾う。`DbError.runWithKind` で値にし、業務の判断をして、他は `DbError.raise` で流す。
+制約違反は制約名付き（`notNullViolation` だけ列名）。制約名は pgjdbc の `ServerErrorMessage` から取るので、PG のロケールに依存しない。
 
-```flix
-pub enum RegisterError with Eq, ToString {
-    case EmailTaken(String)
-}
+### 入力の制約は DDL に書く
 
-pub def registerUser(user: NewUser): Result[RegisterError, Int64] \ DbWrite =
-    match DbError.runWithKind(() -> UsersQueries.insertUser({ name = user#name, email = user#email, role = "member" })) {
-        case Ok(Some(row)) => Ok(row#id)
-        case Ok(None) => DbErr.other("INSERT ... RETURNING returned no row")
-        case Err(DbErrorKind.UniqueViolation("users_email_key")) => Err(RegisterError.EmailTaken(user#email))
-        case Err(kind) => DbError.raise(kind)
-    }
+長さや文字種のような入力の制約は、DB の `CHECK` に書く。全経路（バッチ、手作業、別のアプリ）を守れるのは DB の制約だけで、
+言語側の検証は自分のコードの経路しか守らない。言語側にも書くのは、フォームに複数のエラーをまとめて返すといった UX のためで、防御線ではない。
+
+- 分岐したい制約には `CONSTRAINT name` で名前を付ける。名前が無いと PostgreSQL が付けた名前で返り、推測になる
+- `CHECK` で書けない条件は、FK で表せる形に正規化する → トリガ → 監査クエリで後追い、の順で寄せる
+- `NOT NULL` は生成された関数の引数の型が守る。`notNullViolation` が出るのは、生 SQL か UPDATE で NULL を書いたとき
+
+既存のデータがある表に `CHECK` を足すときは、`ADD CONSTRAINT ... NOT VALID` で足し（新規の書き込みだけ検査が効く）、
+違反している行を数えて直してから `VALIDATE CONSTRAINT` する。一発の `ADD CONSTRAINT` は 1 行でも違反があれば失敗する。
+
+```sql
+ALTER TABLE users ADD CONSTRAINT users_name_length CHECK (length(name) <= 50) NOT VALID;
+-- SELECT count(*) FROM users WHERE NOT (length(name) <= 50) で数えて直す
+ALTER TABLE users VALIDATE CONSTRAINT users_name_length;
 ```
 
-境界（main / HTTP ハンドラ / テスト）で 1 層の `Result` にするには `DbError.runWithFailure`。
-制約名は pgjdbc の `ServerErrorMessage` から取るので、PG のロケールに依存しない。
+### 制約違反を業務エラーに翻訳する
+
+生成器は DDL の名前付き制約をテーブルごとの enum にし、翻訳しながら書き込む `onConstraint` を出す。
+
+```flix
+// 生成物（src/Gen/Tables.flix）
+mod UsersTable {
+    pub enum Constraint { case EmailKey /* users_email_key */, case NameLength /* users_name_length */ }
+    pub def raiseConstraint(constraint: Constraint): a \ DbErr                         // 翻訳しない case で元の DbErr に戻す
+    pub def onConstraint(translate: Constraint -> a \ ef1, thunk: Unit -> a \ ef2): a \ ef1 + ef2 + {TransientDbErr, DbErr}
+}
+```
+
+翻訳は enum 上の `match` で書く。case が足りなければコンパイルエラーなので、migration で制約を足して再生成すると、
+そのテーブルに書く箇所すべてが新しい case を書くまで通らない。業務エラーも `DbErr` と同じくエフェクトにすると、途中の関数は戻り値を包まず、境界で 1 回ハンドリングするだけになる。
+
+```flix
+pub eff RegisterErr {
+    def emailTaken(email: String): Void
+    def nameTooLong(): Void
+}
+
+pub def registerUser(user: NewUser): Int64 \ DbWrite + RegisterErr =
+    UsersTable.onConstraint(translateUserConstraint(user), () ->
+        UsersQueries.insertUser({ name = user#name, email = user#email, role = "member" }) |> expectRow)
+
+def translateUserConstraint(user: NewUser, constraint: UsersTable.Constraint): a \ RegisterErr = match constraint {
+    case UsersTable.Constraint.EmailKey => RegisterErr.emailTaken(user#email)
+    case UsersTable.Constraint.NameLength => RegisterErr.nameTooLong()
+}
+```
+
+enum に無い名前の違反（本番に手で足した制約など）と、制約違反以外の DB エラーは翻訳されず、`DbErr` のまま上へ流れる。
+`onConstraint` は `Tx.withTx` の **外** で呼ぶ。PG は制約違反で Tx を abort するので、内側で翻訳して値を返すと `withTx` が COMMIT を発行してしまう。
+
+境界（main / HTTP ハンドラ / テスト）で 1 層の `Result` にするには `DbError.runWithFailure`。業務エラーは `run … with handler RegisterErr { … }` で受ける。
 
 ## 7. Tx と再実行
 
 ```flix
-Jdbc.withConnection(config, conn ->                 // 開いて、必ず閉じる
-    Retry.withRetry(3, () ->                        // Transient なら thunk を最初から呼び直す
-        Tx.withTx(conn, () ->                       // BEGIN / COMMIT。失敗なら ROLLBACK して再送出
-            Blog.removeUser(1i64))))
+Retry.withRetry(3, () ->                            // Transient なら thunk を最初から呼び直す（接続も取り直す）
+    Jdbc.withConnection(config, conn ->             // 開いて、必ず閉じる
+        UsersTable.onConstraint(translate, () ->    // 制約違反の翻訳は Tx の外
+            Tx.withTx(conn, () ->                   // BEGIN / COMMIT。失敗なら ROLLBACK して再送出
+                Blog.removeUser(1i64)))))
 ```
+
+`withRetry` を `withConnection` の外に置くのは、`connectionLost` した接続で再試行しても無駄だから。
 
 ```
    withRetry ─┬─ attempt 1: withTx ─ BEGIN ─ DELETE ─ UPDATE ─ deadlock ─ ROLLBACK
@@ -331,6 +373,12 @@ Jdbc.withConnection(config, conn ->                 // 開いて、必ず閉じ�
 
 再実行は Tx 単位。PG はデッドロック後に Tx 全体が aborted になるので、文単位の再実行は意味を持たない。
 COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続は autocommit に戻る。ネストは v0 では未対応。
+
+### Web から使うときの前提
+
+- 縁（全ハンドラ共通）で `DbError.runWithFailure`（→ 500 / 503）、`Retry.withRetry`、`Jdbc.withConnection`、`RawSql.runWithAllow` を重ね、ハンドラごとに書くのは検証と Tx の範囲と制約違反の翻訳
+- 業務エラー（`RegisterErr` のようなエフェクト）は service 層で翻訳し、controller のハンドラで HTTP のステータスに写す。検証（`Validation`）のエラーと同じ型にまとめる例が `examples/blog/src/BlogForm.flix`
+- 発行 SQL と件数の記録は `DbTest.runLogging` を縁に被せる。接続プールと `statement_timeout` の口は未実装（`withConnection` は毎回接続する）
 
 ## 8. テストの書き方
 

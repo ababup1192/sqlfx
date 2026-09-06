@@ -60,6 +60,18 @@ mod DbTest {
         }
 
     ///
+    /// 書き込みが全部 `kind` で失敗する。execute と executeReturning の両方。
+    /// 制約違反の翻訳（uniqueViolation → 業務エラー等）を DB 無しで確かめるのに使う。
+    ///
+    pub def runFailingWrite(kind: DbError.DbErrorKind, thunk: Unit -> a \ ef): a \ ef - SqlWrite =
+        run {
+            thunk()
+        } with handler SqlWrite {
+            def execute(_sql, _params, resume) = resume(Err(kind))
+            def executeReturning(_sql, _params, resume) = resume(Err(kind))
+        }
+
+    ///
     /// Sql を包み、発行する文を Logger へ流してから外側の Sql へそのまま転送する。
     /// ハンドラを合成できることの見本。JDBC の前にも、runRecording の前にも被せられる。
     /// WhyNot: パラメータの値をログに出さないのは、password や個人情報が平文で残るから。SQL と件数だけ出す。

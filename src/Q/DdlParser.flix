@@ -1,6 +1,9 @@
 ///
-/// migrations の DDL を読んで机上のスキーマを進める。読むのは CREATE TABLE / ALTER TABLE ADD|DROP COLUMN / DROP TABLE だけ。
-/// CREATE INDEX は無視、それ以外は「読めない DDL」として警告に積む（design.md §3、PLAN フェーズ 2-2）。
+/// migrations の DDL を読んで机上のスキーマを進める。読むのは CREATE TABLE / ALTER TABLE ADD|DROP COLUMN / DROP TABLE と、
+/// 名前付きの制約（CONSTRAINT name ... / CREATE UNIQUE INDEX name）。それ以外は「読めない DDL」として警告に積む（design.md §3、PLAN フェーズ 2-2）。
+///
+/// 名前の無い UNIQUE / CHECK / FOREIGN KEY はエラーにする。違反が制約名で返るので、名前が無いと生成コードから参照できない。
+/// PRIMARY KEY だけは名前が無くてもよい（生成コードの対象にしない）。
 ///
 /// WhyNot: 本物の SQL パーサを書かないのは、スキーマ解決に要るのがテーブルと列と型だけだから。
 /// 読めない文は落とさず警告にするので、トリガや関数を含む migration でも生成は止まらない。
@@ -9,6 +12,8 @@ mod DdlParser {
 
     use Schema.Schema
     use Schema.Column
+    use Schema.Constraint
+    use Schema.ConstraintKind
     use SqlType.SqlType
 
     ///
@@ -21,6 +26,10 @@ mod DdlParser {
         case UnknownColumn(String, String)
         /// CREATE TABLE の列定義が読めない（文）
         case Unreadable(String)
+        /// 列定義の中の名前の無い UNIQUE / CHECK / REFERENCES（文, 列名）。`CONSTRAINT name` を付けてもらう
+        case UnnamedColumnConstraint(String, String)
+        /// 名前の無いテーブル制約 UNIQUE / CHECK / FOREIGN KEY（文, テーブル名）
+        case UnnamedTableConstraint(String, String)
     }
 
     ///
@@ -51,8 +60,9 @@ mod DdlParser {
             case "ALTER" :: "TABLE" :: "ONLY" :: _ => alterTable(nth(3, words), List.drop(4, words), statement, schema)
             case "ALTER" :: "TABLE" :: _ => alterTable(nth(2, words), List.drop(3, words), statement, schema)
             case "CREATE" :: "INDEX" :: _ => Ok((schema, None))
-            case "CREATE" :: "UNIQUE" :: "INDEX" :: _ => Ok((schema, None))
-            case "DROP" :: "INDEX" :: _ => Ok((schema, None))
+            case "CREATE" :: "UNIQUE" :: "INDEX" :: _ => uniqueIndex(List.drop(3, words), statement, schema)
+            case "DROP" :: "INDEX" :: _ => Ok((dropIndexes(List.drop(2, words), schema), None))
+            case "ALTER" :: "INDEX" :: _ => Ok((renameIndex(List.drop(2, words), schema), None))
             case Nil => Ok((schema, None))
             case _ => Ok((schema, Some("unreadable DDL: ${List.take(3, words) |> List.join(" ")} ...")))
         }
@@ -64,28 +74,124 @@ mod DdlParser {
         let name = nth(0, afterKeyword) |> unquote;
         match (String.indexOf(substr = "(", statement), String.indexOfRight(substr = ")", statement)) {
             case (Some(open), Some(close)) if open < close =>
-                String.slice(start = open + 1, end = close, statement)
-                    |> splitTopLevel(',')
-                    |> List.map(String.trim)
-                    |> List.filter(definition -> not isConstraint(definition))
-                    |> List.traverse(definition -> parseColumn(definition) |> Option.toOk(DdlError.Unreadable(statement)))
-                    |> Result.map(columns -> (Schema.addTable({ name = name, columns = columns }, schema), None))
+                let definitions = String.slice(start = open + 1, end = close, statement) |> splitTopLevel(',') |> List.map(String.trim);
+                let (constraintDefinitions, columnDefinitions) = List.partition(isConstraint, definitions);
+                forM (
+                    parsedColumns <- List.traverse(definition -> parseColumnDefinition(definition, statement), columnDefinitions);
+                    tableLevel <- List.traverse(definition -> tableConstraint(definition, statement, name), constraintDefinitions)
+                ) yield {
+                    let constraints = List.append(List.flatMap(snd, parsedColumns), List.filterMap(identity, tableLevel));
+                    (Schema.addTable({ name = name, columns = List.map(fst, parsedColumns), constraints = constraints }, schema), None)
+                }
             case _ => Err(DdlError.Unreadable(statement))
         }
+
+    ///
+    /// `CREATE UNIQUE INDEX [CONCURRENTLY] [IF NOT EXISTS] name ON table (...)`。違反はインデックス名で返るので UNIQUE 制約として持つ。
+    ///
+    def uniqueIndex(afterKeyword: List[String], statement: String, schema: Schema): Result[DdlError, (Schema, Option[String])] =
+        let words = List.dropWhile(word -> List.memberOf(String.toUpperCase(word), List#{"CONCURRENTLY", "IF", "NOT", "EXISTS"}), afterKeyword);
+        match words {
+            case rawName :: on :: rawTable :: _ if String.toUpperCase(on) == "ON" =>
+                let table = unquote(rawTable);
+                Schema.addConstraint(table, { name = unquote(rawName), kind = ConstraintKind.Unique }, schema)
+                    |> Option.map(next -> (next, None))
+                    |> Option.toOk(DdlError.UnknownTable(statement, table))
+            case _ => Ok((schema, Some("unreadable DDL: CREATE UNIQUE INDEX ...")))
+        }
+
+    ///
+    /// `DROP INDEX [CONCURRENTLY] [IF EXISTS] a, b`。テーブル名を持たないので、どのテーブルからでも消す。
+    ///
+    def dropIndexes(afterKeyword: List[String], schema: Schema): Schema =
+        List.dropWhile(word -> List.memberOf(String.toUpperCase(word), List#{"CONCURRENTLY", "IF", "EXISTS"}), afterKeyword)
+            |> List.takeWhile(word -> not List.memberOf(String.toUpperCase(word), List#{"CASCADE", "RESTRICT"}))
+            |> List.filter(word -> word != ",")
+            |> List.foldLeft((acc, rawName) -> Schema.dropConstraintAnywhere(unquote(rawName), acc), schema)
+
+    ///
+    /// `ALTER INDEX [IF EXISTS] old RENAME TO new`。それ以外の ALTER INDEX は制約に関係ないので無視。
+    ///
+    def renameIndex(afterKeyword: List[String], schema: Schema): Schema =
+        let words = List.dropWhile(word -> List.memberOf(String.toUpperCase(word), List#{"IF", "EXISTS"}), afterKeyword);
+        match List.map(String.toUpperCase, words) {
+            case _ :: "RENAME" :: "TO" :: _ => Schema.renameConstraintAnywhere({ oldName = unquote(nth(0, words)), newName = unquote(nth(3, words)) }, schema)
+            case _ => schema
+        }
+
+    ///
+    /// 列定義 1 つを、列と、その中の名前付き制約に読む。
+    ///
+    def parseColumnDefinition(definition: String, statement: String): Result[DdlError, (Column, List[Constraint])] =
+        forM (
+            column <- parseColumn(definition) |> Option.toOk(DdlError.Unreadable(statement));
+            inline <- inlineConstraints(definition, statement)
+        ) yield (column, inline)
+
+    ///
+    /// 列定義の中の制約を全部拾う。`CONSTRAINT name UNIQUE|CHECK|REFERENCES` を積み、`CONSTRAINT name PRIMARY KEY|NOT NULL` は対象外で飛ばす。
+    /// CONSTRAINT の直後以外に UNIQUE / CHECK / REFERENCES が出たら名前無しなのでエラー。括弧の中（CHECK の式、REFERENCES の列）は見ない。
+    ///
+    def inlineConstraints(definition: String, statement: String): Result[DdlError, List[Constraint]] =
+        let words = tokens(definition);
+        let column = nth(0, words) |> unquote;
+        scanConstraints({ statement = statement, owner = column }, List.drop(1, words), 0, Nil) |> Result.map(List.reverse)
+
+    ///
+    /// 語を左から見て制約を積む。depth は括弧の深さ、acc は積んだ制約の逆順。
+    ///
+    def scanConstraints(context: { statement = String, owner = String }, words: List[String], depth: Int32, acc: List[Constraint]): Result[DdlError, List[Constraint]] =
+        match words {
+            case Nil => Ok(acc)
+            case "(" :: rest => scanConstraints(context, rest, depth + 1, acc)
+            case ")" :: rest => scanConstraints(context, rest, depth - 1, acc)
+            case _ :: rest if depth > 0 => scanConstraints(context, rest, depth, acc)
+            case word :: rawName :: kindWord :: rest if String.toUpperCase(word) == "CONSTRAINT" =>
+                match constraintKindOf(String.toUpperCase(kindWord)) {
+                    case Some(kind) => scanConstraints(context, rest, depth, { name = unquote(rawName), kind = kind } :: acc)
+                    case None => scanConstraints(context, rest, depth, acc)
+                }
+            case word :: _ if Option.nonEmpty(constraintKindOf(String.toUpperCase(word))) => Err(DdlError.UnnamedColumnConstraint(context#statement, context#owner))
+            case _ :: rest => scanConstraints(context, rest, depth, acc)
+        }
+
+    ///
+    /// テーブル制約。`CONSTRAINT name UNIQUE|CHECK|FOREIGN KEY|PRIMARY KEY (...)`。名前無しの UNIQUE / CHECK / FOREIGN KEY はエラー、
+    /// PRIMARY KEY と EXCLUDE は名前があってもなくても対象外（None）。
+    ///
+    def tableConstraint(definition: String, statement: String, table: String): Result[DdlError, Option[Constraint]] =
+        let words = tokens(definition);
+        match List.map(String.toUpperCase, words) {
+            case "CONSTRAINT" :: _ :: kindWord :: _ =>
+                Ok(constraintKindOf(kindWord) |> Option.map(kind -> { name = nth(1, words) |> unquote, kind = kind }))
+            case kindWord :: _ if Option.nonEmpty(constraintKindOf(kindWord)) => Err(DdlError.UnnamedTableConstraint(statement, table))
+            case _ => Ok(None)
+        }
+
+    ///
+    /// 制約の先頭の語 → 種類。REFERENCES は列定義の中の FK。
+    ///
+    def constraintKindOf(upper: String): Option[ConstraintKind] = match upper {
+        case "UNIQUE" => Some(ConstraintKind.Unique)
+        case "CHECK" => Some(ConstraintKind.Check)
+        case "FOREIGN" => Some(ConstraintKind.ForeignKey)
+        case "REFERENCES" => Some(ConstraintKind.ForeignKey)
+        case _ => None
+    }
 
     ///
     /// `DROP TABLE a, b [CASCADE]`。名前をカンマ区切りで全部落とす。
     ///
     def dropTables(words: List[String], schema: Schema): Schema =
         words
-            |> List.takeWhile(word -> word != "CASCADE" and word != "RESTRICT" and String.toUpperCase(word) != "CASCADE")
+            |> List.takeWhile(word -> not List.memberOf(String.toUpperCase(word), List#{"CASCADE", "RESTRICT"}))
             |> List.filter(word -> word != ",")
             |> List.foldLeft((acc, name) -> Schema.dropTable(unquote(name), acc), schema)
 
     ///
     /// `ADD [COLUMN] [IF NOT EXISTS] 定義` / `DROP [COLUMN] [IF EXISTS] 名前` /
-    /// `ALTER [COLUMN] 名前 SET|DROP NOT NULL` / `ALTER [COLUMN] 名前 TYPE 型` / `RENAME [COLUMN] 旧 TO 新`。
-    /// 制約の追加・削除は無視、それ以外の ALTER は警告。
+    /// `ALTER [COLUMN] 名前 SET|DROP NOT NULL` / `ALTER [COLUMN] 名前 TYPE 型` / `RENAME [COLUMN] 旧 TO 新` /
+    /// `ADD CONSTRAINT name ...` / `DROP CONSTRAINT name`。それ以外の ALTER は警告。
     ///
     /// WhyNot: ALTER COLUMN を警告で済ませないのは、NULL 可否や型が古いままのコードを吐くと実行時の decodeError になるから。
     ///
@@ -93,9 +199,26 @@ mod DdlParser {
         let name = unquote(rawName);
         let normalized = dropOptionalWords(List#{"COLUMN", "IF", "NOT", "EXISTS"}, action);
         let upper = List.map(String.toUpperCase, normalized);
-        match upper {
-            case "ADD" :: word :: _ if isConstraintStart(word) => Ok((schema, None))
-            case "DROP" :: "CONSTRAINT" :: _ => Ok((schema, None))
+        let unknownTable = DdlError.UnknownTable(statement, name);
+        if (List.length(splitTopLevel(',', List.join(" ", action))) > 1)
+            Ok((schema, Some("unreadable DDL: ALTER TABLE with several actions (split them): ${List.take(4, action) |> List.join(" ")} ...")))
+        else match upper {
+            case "ADD" :: word :: _ if isConstraintStart(word) =>
+                tableConstraint(List.join(" ", List.drop(1, normalized)), statement, name)
+                    |> Result.flatMap(found -> match found {
+                        case Some(constraint) => Schema.addConstraint(name, constraint, schema) |> Option.toOk(unknownTable)
+                        case None => Ok(schema)
+                    })
+                    |> Result.map(next -> (next, None))
+            case "DROP" :: "CONSTRAINT" :: _ =>
+                let dropped = List.drop(2, normalized) |> List.dropWhile(word -> List.memberOf(String.toUpperCase(word), List#{"IF", "EXISTS"}));
+                Schema.dropConstraint({ table = name, constraint = nth(0, dropped) |> unquote }, schema)
+                    |> Option.map(next -> (next, None))
+                    |> Option.toOk(unknownTable)
+            case "RENAME" :: "CONSTRAINT" :: _ :: "TO" :: _ =>
+                Schema.renameConstraint({ table = name, oldName = unquote(nth(2, normalized)), newName = unquote(nth(4, normalized)) }, schema)
+                    |> Option.map(next -> (next, None))
+                    |> Option.toOk(unknownTable)
             case "ADD" :: _ => addColumn(name, List.drop(1, normalized), statement, schema)
             case "DROP" :: _ => dropColumn(name, nth(1, normalized), statement, schema)
             case "ALTER" :: _ :: "SET" :: "NOT" :: "NULL" :: _ => setNullable({ table = name, column = unquote(nth(1, normalized)) }, false, statement, schema)
@@ -144,13 +267,15 @@ mod DdlParser {
             _ <- Schema.findColumn(target#column, found) |> Option.toOk(DdlError.UnknownColumn(statement, target#column))
         ) yield {
             let columns = List.map(column -> if (column#name == target#column) change(column) else column, found#columns);
-            (Schema.addTable({ name = found#name, columns = columns }, schema), None)
+            (Schema.addTable({ name = found#name, columns = columns, constraints = found#constraints }, schema), None)
         }
 
     def addColumn(table: String, definition: List[String], statement: String, schema: Schema): Result[DdlError, (Schema, Option[String])] =
+        let unknownTable = DdlError.UnknownTable(statement, table);
         forM (
-            column <- parseColumn(List.join(" ", definition)) |> Option.toOk(DdlError.Unreadable(statement));
-            next <- Schema.addColumn(table, column, schema) |> Option.toOk(DdlError.UnknownTable(statement, table))
+            parsed <- parseColumnDefinition(List.join(" ", definition), statement);
+            withColumn <- Schema.addColumn(table, fst(parsed), schema) |> Option.toOk(unknownTable);
+            next <- Result.foldLeftM((acc, constraint) -> Schema.addConstraint(table, constraint, acc) |> Option.toOk(unknownTable), withColumn, snd(parsed))
         ) yield (next, None)
 
     def dropColumn(table: String, rawColumn: String, statement: String, schema: Schema): Result[DdlError, (Schema, Option[String])] =
@@ -208,7 +333,7 @@ mod DdlParser {
     ///
     def isConstraint(definition: String): Bool =
         match tokens(definition) {
-            case word :: _ => List.memberOf(String.toUpperCase(word), List#{"CONSTRAINT", "PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "EXCLUDE"})
+            case word :: _ => isConstraintStart(String.toUpperCase(word))
             case Nil => true
         }
 
@@ -261,13 +386,15 @@ mod DdlParser {
         List.drop(n, words) |> List.head |> Option.getWithDefault("")
 
     ///
-    /// `"name"` → `name`。`public.users` → `users`。
+    /// `"Name"` → `Name`、`Name` → `name`（PG は引用符の無い識別子を小文字に畳む。DB が返す制約名やテーブル名と一致させる）。
+    /// `public.users` → `users`。
     ///
     def unquote(word: String): String =
-        String.replace(src = "\"", dst = "", word)
+        let folded = if (String.contains(substr = "\"", word)) String.replace(src = "\"", dst = "", word) else String.toLowerCase(word);
+        folded
             |> String.splitOn(substr = ".")
             |> List.last
-            |> Option.getWithDefault(word)
+            |> Option.getWithDefault(folded)
 
     def charsToString(chars: List[Char]): String =
         region rc {

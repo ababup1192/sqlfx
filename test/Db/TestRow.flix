@@ -35,3 +35,13 @@ def testGetByName(): Unit \ Assert =
 def testColumnNamesInIndexOrder(): Unit \ Assert =
     let row = { columns = Row.makeColumnIndex(List#{"z", "a", "m"}), cells = Vector#{} };
     Assert.assertEq(expected = List#{"z", "a", "m"}, Row.columnNames(row))
+
+/// set は既存の列を差し替え、無い列は末尾に足す。他の列は変わらない。
+@Test
+def testRowSet(): Unit \ Assert =
+    let row = Row.makeRows(List#{"id", "name"}, List#{List#{SqlValue.Int64(1i64), SqlValue.Str("a")}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let replaced = Row.set("name", SqlValue.Str("b"), row);
+    let added = Row.set("email", SqlValue.Null, row);
+    Assert.assertEq(
+        expected = (Some(SqlValue.Str("b")), Some(SqlValue.Int64(1i64)), Some(SqlValue.Null), List#{"id", "name", "email"}),
+        (Row.get("name", replaced), Row.get("id", replaced), Row.get("email", added), Row.columnNames(added)))

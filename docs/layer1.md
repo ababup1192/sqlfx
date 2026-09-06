@@ -35,7 +35,16 @@ query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pre
 ## 読む DDL（DdlParser）
 
 CREATE TABLE / DROP TABLE（カンマ区切りも）/ ALTER TABLE の ADD|DROP [COLUMN] [IF [NOT] EXISTS]・ALTER COLUMN SET|DROP NOT NULL・TYPE・RENAME COLUMN。
-制約の追加削除と CREATE INDEX は無視、それ以外の文は警告。`NUMERIC(10, 2)` のような長さ指定は落として型名だけ見る。
+名前付きの制約（`CONSTRAINT name UNIQUE|CHECK|FOREIGN KEY`、列の中の `CONSTRAINT name ...`、`ADD|DROP CONSTRAINT`、`CREATE UNIQUE INDEX name`、`DROP INDEX`）はテーブルの制約一覧に積む。
+名前の無い UNIQUE / CHECK / FOREIGN KEY はエラー（`UnnamedColumnConstraint` / `UnnamedTableConstraint`）。引用符の無い識別子は PG と同じく小文字に畳む。PRIMARY KEY は名前無しでよく、一覧には入れない。
+CREATE INDEX は無視、それ以外の文は警告。`NUMERIC(10, 2)` のような長さ指定は落として型名だけ見る。
+
+## 制約の enum（Tables.flix）
+
+テーブルに名前付きの制約があれば、`mod UsersTable` に `enum Constraint { case EmailKey ... }`（`users_` の接頭辞を落として PascalCase）、
+`constraintOf` / `constraintName`、翻訳しない case を元の `DbErr` に戻す `raiseConstraint`、翻訳しながら書き込む `onConstraint` を出す。
+`onConstraint` は `DbError.onConstraintWith(constraintOf, translate, thunk)` を包んだだけで、translate は enum 上の全域関数。
+case が足りなければコンパイルエラーになるので、制約を足して再生成すると翻訳の書き忘れが型で見つかる。
 
 ## 解決の規則（QResolve）
 

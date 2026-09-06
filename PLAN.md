@@ -61,11 +61,11 @@
    - `:name` の宣言と使用の対応検査（未宣言・未使用・slot も同様・keyed は many だけ・同名禁止）
    - 機械置換で完全な SQL に戻す（`QRender.toSql`: `:id` → `$1`、`{filter}` → `TRUE`、`{order}` → 空）
 2. [x] **スキーマ解決**（`Schema` / `DdlParser` / `QResolve`）: `migrations/*.sql` から机上のスキーマを組み、SELECT リストの列を名前・型・NULL 可否まで決める
-   - DDL は CREATE TABLE / DROP TABLE / ALTER TABLE（ADD|DROP COLUMN、ALTER COLUMN の NOT NULL・TYPE、RENAME COLUMN）を読む。制約と CREATE INDEX は無視、それ以外は警告
+   - DDL は CREATE TABLE / DROP TABLE / ALTER TABLE（ADD|DROP COLUMN、ALTER COLUMN の NOT NULL・TYPE、RENAME COLUMN）と名前付きの制約を読む。名前の無い UNIQUE / CHECK / FK はエラー、CREATE INDEX は無視、それ以外は警告
    - 式の列は `expr::type AS name` の形だけ（型推論はしない）。LEFT / FULL JOIN の相手は NULL 可
 3. [x] **codegen**（`Codegen` + `src/Main.flix` の `gen` サブコマンド、`make gen`）
    - クエリごとに行レコード + デコーダ（forA）+ 型付き関数（`one` → `Option[Row] \ {SqlRead, DbErr}`、`exec` → `Int32 \ SqlWrite`、RETURNING 付きの書き込みは `\ {SqlWrite, DbErr}`）
-   - テーブルごとに断片 DSL 用の `Col` 定義（`Tables.flix`）
+   - テーブルごとに断片 DSL 用の `Col` 定義と、制約の enum + `onConstraint`（`Tables.flix`）
    - 生成物に `.q` のハッシュ（`sourceHash`）を埋め、テストで現物と照合する
 4. [x] **断片 DSL の最小版**（`Fragment`）: `Col[row, a]` / `Pred[row]` / `Order[row]`、
    `eq ne lt le gt ge like isNull isNotNull inList both either negate when all` / `asc desc then`

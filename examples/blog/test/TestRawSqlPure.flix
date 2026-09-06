@@ -24,3 +24,16 @@ def testRawDecodeErrorIsDbErr(): Unit \ Assert =
     let rows = Row.makeRows(List#{"id"}, List#{List#{SqlValue.Int64(1i64)}});
     let result = DbTest.runWithRows(rows, () -> RawSql.runWithAllow(() -> DbError.runWithFailure(() -> BlogRaw.findUserByEmail("x"))));
     Assert.assertEq(expected = Err(DbError.DbFailure.Permanent("name: column 'name' is missing")), result |> Result.map(_ -> ()))
+
+/// 汚染データ: name に数値が入った行を Decoder.attempt で読むと、その列だけ Err になり行は落ちない。
+///
+///   1 alice / 2 (name = 42) / 3 carol → [Ok(alice), Err(TypeMismatch), Ok(carol)]
+@Test
+def testRecoverKeepsBrokenRow(): Unit \ Assert =
+    let rows = BlogRows.users(List#{{ id = 1i64, name = "alice", email = None }, { id = 2i64, name = "bob", email = None }, { id = 3i64, name = "carol", email = None }})
+        |> List.map(row -> if (Row.get("id", row) == Some(SqlValue.Int64(2i64))) Row.set("name", SqlValue.Int64(42i64), row) else row);
+    let names = DbTest.runWithRows(rows, () -> RawSql.runWithAllow(() -> DbError.runWithFailure(() ->
+        Sql.fetchAs(Decoder.attempt(Decoder.str("name")), "SELECT name FROM users", Nil))));
+    Assert.assertEq(
+        expected = Ok(List#{Ok("alice"), Err(Decoder.DecodeError.TypeMismatch("name", "Str", "Int64")), Ok("carol")}),
+        names)

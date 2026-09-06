@@ -46,4 +46,21 @@ def testConstraintName(): Unit \ Assert =
 def testClassifyPrefersServerConstraint(): Unit \ Assert =
     Assert.assertEq(
         expected = DbErrorKind.ForeignKeyViolation("posts_user_id_fkey"),
-        SqlState.classifyWith({ sqlState = "23503", message = "テーブル\"posts\"の挿入または更新は外部キー制約\"posts_user_id_fkey\"に違反しています キーはテーブル\"users\"に存在しません", constraint = Some("posts_user_id_fkey") }))
+        SqlState.classifyWith({ sqlState = "23503", message = "テーブル\"posts\"の挿入または更新は外部キー制約\"posts_user_id_fkey\"に違反しています キーはテーブル\"users\"に存在しません", constraint = Some("posts_user_id_fkey"), column = None }))
+
+/// CHECK 違反は制約名付き、NOT NULL 違反は列名付き。列名はメッセージの最後の引用符がテーブル名なので、サーバが返した列名を使う。
+@Test
+def testClassifyCheckAndNotNull(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{DbErrorKind.CheckViolation("users_name_length"), DbErrorKind.NotNullViolation("email")},
+        List#{
+            SqlState.classifyWith({ sqlState = "23514", message = "new row for relation \"users\" violates check constraint \"users_name_length\"", constraint = Some("users_name_length"), column = None }),
+            SqlState.classifyWith({ sqlState = "23502", message = "null value in column \"email\" of relation \"users\" violates not-null constraint", constraint = None, column = Some("email") })
+        })
+
+/// pgjdbc が列名を返さないとき（包み直された SQLException など）は、メッセージの最初の引用符を列名にする。最後の引用符はテーブル名。
+@Test
+def testNotNullFallsBackToFirstQuoted(): Unit \ Assert =
+    Assert.assertEq(
+        expected = DbErrorKind.NotNullViolation("email"),
+        SqlState.classifyWith({ sqlState = "23502", message = "null value in column \"email\" of relation \"users\" violates not-null constraint", constraint = None, column = None }))

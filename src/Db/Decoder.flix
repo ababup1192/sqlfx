@@ -144,6 +144,26 @@ mod Decoder {
         })
 
     ///
+    /// 壊れた値を行ごと落とさず、失敗を値として残す。内側が TypeMismatch で失敗したら Err、成功したら Ok。列はそのまま。
+    /// NULL は `opt` の役目、列が無い（MissingColumn）のは SELECT 句とデコーダのずれなので握らず落とす。
+    ///
+    /// WhyNot: Option にしないのは、None にした事実がどこにも残らず、汚染に気付く経路が消えるから。
+    /// 件数の集計やログは、Err を持った利用者が組む。
+    ///
+    pub def attempt(decoder: Decoder[a]): Decoder[Result[DecodeError, a]] =
+        let Decoder.Decoder(reversed, decode) = decoder;
+        Decoder.Decoder(reversed, row -> match decode(row) {
+            case Err(error) if isTypeMismatch(error) => Ok(Err(error))
+            case Err(error) => Err(error)
+            case Ok(value) => Ok(Ok(value))
+        })
+
+    def isTypeMismatch(error: DecodeError): Bool = match error {
+        case DecodeError.TypeMismatch(_, _, _) => true
+        case _ => false
+    }
+
+    ///
     /// 型付きの列デコーダを組む。`extract` が None を返したら TypeMismatch、NULL なら UnexpectedNull。
     ///
     pub def typed(column: { name = String, expected = String }, extract: SqlValue.SqlValue -> Option[a]): Decoder[a] =

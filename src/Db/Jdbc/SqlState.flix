@@ -8,16 +8,16 @@ mod SqlState {
     /// sqlstate の一覧: https://www.postgresql.org/docs/current/errcodes-appendix.html
     ///
     pub def classify(error: { sqlState = String, message = String }): DbErrorKind =
-        classifyWith({ sqlState = error#sqlState, message = error#message, constraint = None })
+        classifyWith({ sqlState = error#sqlState, message = error#message, constraint = None, column = None })
 
     ///
-    /// サーバが制約名を別枠で返しているとき（pgjdbc の ServerErrorMessage.getConstraint）はそれを優先する。
+    /// サーバが制約名や列名を別枠で返しているとき（pgjdbc の ServerErrorMessage.getConstraint / getColumn）はそれを優先する。
     /// 無ければメッセージから取り出す。
     ///
     /// WhyNot: メッセージの解析だけに頼らないのは、PG のメッセージがロケールで変わり、日本語では
     /// 制約名の後ろにテーブル名の引用が続いて「最後の引用符」が制約名にならないから。
     ///
-    pub def classifyWith(error: { sqlState = String, message = String, constraint = Option[String] }): DbErrorKind =
+    pub def classifyWith(error: { sqlState = String, message = String, constraint = Option[String], column = Option[String] }): DbErrorKind =
         let sqlState = error#sqlState;
         let message = error#message;
         let constraint = error#constraint;
@@ -25,6 +25,10 @@ mod SqlState {
             DbErrorKind.UniqueViolation(Option.getWithDefault(constraintName(message), constraint))
         else if (sqlState == "23503")
             DbErrorKind.ForeignKeyViolation(Option.getWithDefault(constraintName(message), constraint))
+        else if (sqlState == "23514")
+            DbErrorKind.CheckViolation(Option.getWithDefault(constraintName(message), constraint))
+        else if (sqlState == "23502")
+            DbErrorKind.NotNullViolation(Option.getWithDefault(columnName(message), error#column))
         else if (sqlState == "40001" or sqlState == "40P01")
             DbErrorKind.Deadlock
         else if (sqlState == "57014")
@@ -45,10 +49,23 @@ mod SqlState {
     /// pgjdbc が制約名を返さなかったときの保険。
     ///
     pub def constraintName(message: String): String =
+        quoted(message) |> List.last |> Option.getWithDefault(message)
+
+    ///
+    /// NOT NULL 違反のメッセージから列名を取り出す。列名は最初の引用符の中に来る。
+    /// `null value in column "email" of relation "users" violates not-null constraint` → `email`（最後の引用符はテーブル名）。
+    ///
+    /// pgjdbc が列名を返さなかったときの保険。
+    ///
+    pub def columnName(message: String): String =
+        quoted(message) |> List.head |> Option.getWithDefault(message)
+
+    ///
+    /// 引用符で囲まれた部分を順に。
+    ///
+    def quoted(message: String): List[String] =
         String.splitOn(substr = "\"", message)
             |> List.zipWithIndex
             |> List.filterMap(match (index, part) -> if (Int32.remainder(index, 2) == 1) Some(part) else None)
-            |> List.last
-            |> Option.getWithDefault(message)
 
 }

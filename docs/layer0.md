@@ -143,6 +143,8 @@ pub eff TransientDbErr {
 pub eff DbErr {
     def uniqueViolation(constraint: String): Void
     def foreignKeyViolation(constraint: String): Void
+    def checkViolation(constraint: String): Void
+    def notNullViolation(column: String): Void
     def schemaMismatch(detail: String): Void
     def decodeError(column: String, detail: String): Void
     def retryExhausted(last: String): Void
@@ -163,6 +165,8 @@ pub enum DbErrorKind with Eq, Order, ToString {
     case ConnectionLost(String)       // 08xxx
     case UniqueViolation(String)      // 23505（制約名は pgjdbc の ServerErrorMessage から）
     case ForeignKeyViolation(String)  // 23503
+    case CheckViolation(String)       // 23514
+    case NotNullViolation(String)     // 23502（列名。pgjdbc の getColumn）
     case SchemaMismatch(String)       // 42P01, 42703, 42883, 42804
     case DecodeError(String, String)  // 結果セットの列が読めない
     case RetryExhausted(String)       // withRetry の枯渇

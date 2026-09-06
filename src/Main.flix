@@ -84,8 +84,9 @@ mod Gen {
             sqlFiles <- listFiles(dirs#migrations, ".sql");
             schema <- buildSchema(sqlFiles);
             qFiles <- listFiles(dirs#queries, ".q");
-            queryFiles <- Result.traverse(path -> renderOne(schema, path, dirs#out), qFiles)
-        ) yield ("${dirs#out}/Tables.flix", Codegen.renderTables(schema)) :: queryFiles
+            queryFiles <- Result.traverse(path -> renderOne(schema, path, dirs#out), qFiles);
+            tables <- Codegen.renderTables(schema) |> Result.mapErr(error -> "Tables.flix: ${error}")
+        ) yield ("${dirs#out}/Tables.flix", tables) :: queryFiles
 
     ///
     /// migrations をファイル名順に適用する。読めない DDL は警告として表示する。

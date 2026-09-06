@@ -104,6 +104,8 @@ pub eff TransientDbErr {         // 一時障害。Tx 境界ごと再実行す�
 pub eff DbErr {                  // 再実行しても直らない DB エラー
     def uniqueViolation(constraint: String): Void
     def foreignKeyViolation(constraint: String): Void
+    def checkViolation(constraint: String): Void
+    def notNullViolation(column: String): Void
     def schemaMismatch(detail: String): Void
     def decodeError(column: String, detail: String): Void
     def retryExhausted(last: String): Void

@@ -239,6 +239,8 @@ DB のエラーもエフェクトです。
 pub eff DbErr {
     def uniqueViolation(constraint: String): Void
     def foreignKeyViolation(constraint: String): Void
+    def checkViolation(constraint: String): Void
+    def notNullViolation(column: String): Void
     def schemaMismatch(detail: String): Void
     def decodeError(column: String, detail: String): Void
     def retryExhausted(last: String): Void
@@ -248,47 +250,53 @@ pub eff DbErr {
 
 `Void` は値が存在しない型なので、このオペレーションから値が返ってくることはありません。呼んだ場所には戻らず、`DbErr` のハンドラまで呼び出し元を遡って伝わります。途中の関数は型に `DbErr` が付くだけで、本体には何も書きません。呼び出しごとに `Result` をアンラップする必要はなく、ハンドリングしたい場所でだけ受け取ります。
 
-次の例では、業務エラー（email の重複）は `Result` で返し、それ以外の DB エラーはエフェクトのままハンドラへ伝えています。`DbError.runWithKind` は囲んだ範囲の `DbErr` を `Result` に変換して受け取るヘルパー（try / catch に相当）で、`DbError.raise` はその逆に、`Err` をエフェクトとして投げ直します。
+業務エラー（email の重複、name の長さ超過）は DB の制約違反から翻訳します。生成器は DDL の名前付き制約をテーブルごとの enum にし、翻訳しながら書き込む `onConstraint` を出します。業務エラーも `DbErr` と同じくエフェクトにすると、途中の関数は戻り値を包まず、境界で 1 回ハンドリングするだけになります。
 
 ```scala:Blog.flix
-pub def registerUser(user: NewUser): Result[RegisterError, Int64] \ DbWrite =
-    match DbError.runWithKind(() -> UsersQueries.insertUser({ name = user#name, email = user#email, role = "member" })) {
-        case Ok(Some(row)) => Ok(row#id)
-        case Ok(None) => DbErr.other("INSERT ... RETURNING returned no row")
-        case Err(DbErrorKind.UniqueViolation("users_email_key")) => Err(RegisterError.EmailTaken(user#email))   // ここだけ業務ロジックの判断
-        case Err(kind) => DbError.raise(kind)                                                             // それ以外は投げ直す
-    }
+pub eff RegisterErr {
+    def emailTaken(email: String): Void
+    def nameTooLong(): Void
+}
+
+pub def registerUser(user: NewUser): Int64 \ DbWrite + RegisterErr =
+    UsersTable.onConstraint(translateUserConstraint(user), () ->
+        UsersQueries.insertUser({ name = user#name, email = user#email, role = "member" }) |> expectRow)
+
+// users の制約は DDL から enum になっている。case が足りなければコンパイルエラー
+def translateUserConstraint(user: NewUser, constraint: UsersTable.Constraint): a \ RegisterErr = match constraint {
+    case UsersTable.Constraint.EmailKey => RegisterErr.emailTaken(user#email)      // CONSTRAINT users_email_key UNIQUE (email)
+    case UsersTable.Constraint.NameLength => RegisterErr.nameTooLong()             // CONSTRAINT users_name_length CHECK (length(name) <= 50)
+}
 ```
 
-`insertUser` は `INSERT ... RETURNING id` を `-> one` で宣言した `.q` から生成した関数です。制約名は PostgreSQL がエラー情報の一部として返す物（pgjdbc の `ServerErrorMessage`）をそのまま使います。DDL の制約名にコードが結合しますが、それは DDL を正とする方針の帰結です。
+`insertUser` は `INSERT ... RETURNING id` を `-> one` で宣言した `.q` から生成した関数です。制約名は PostgreSQL がエラー情報の一部として返す物（pgjdbc の `ServerErrorMessage`）を生成された enum に写します。DDL に制約を足して再生成すると、そのテーブルに書く箇所すべてが新しい case を書くまでコンパイルが通りません。enum に無い名前の違反と、制約違反以外の DB エラーは翻訳されず、`DbErr` のまま上へ流れます。
 
 ```mermaid
 flowchart LR
     jdbc["Jdbc ハンドラ<br/>unique 違反を<br/>Err(UniqueViolation) として返す"]
     ins["insertUser（生成）<br/>Sql.executeReturning が<br/>DbErr.uniqueViolation を投げる"]
-    reg["registerUser<br/>DbError.runWithKind で受け取る"]
-    taken["Err(EmailTaken)<br/>ここで止まる"]
-    boundary["境界（main / テスト）<br/>DbError.runWithFailure<br/>Err(Permanent(...)) として受ける"]
+    reg["UsersTable.onConstraint<br/>制約名を enum に写し<br/>translate を呼ぶ"]
+    taken["RegisterErr.emailTaken<br/>エフェクトとして上へ"]
+    boundary["境界（main / HTTP / テスト）<br/>RegisterErr と DbErr を<br/>ここで 1 回受ける"]
     jdbc --> ins --> reg
-    reg -- "UniqueViolation(users_email_key)" --> taken
-    reg -- "それ以外の DbErr は DbError.raise で投げ直す" --> boundary
+    reg -- "Constraint.EmailKey" --> taken --> boundary
+    reg -- "enum に無い名前 / 制約違反以外は DbErr のまま" --> boundary
 ```
 
-*図 4: DB エラーはハンドラに届くまで呼び出し元を遡る。業務の判断をしたい所でだけ runWithKind で受け取り、残りは境界へ*
+*図 4: DB エラーはハンドラに届くまで呼び出し元を遡る。制約違反は生成された enum で業務エラーに翻訳し、どちらも境界で受ける*
 
-この業務エラーへの変換も DB 無しでテストできます。「INSERT が unique 制約違反を返す」ハンドラを書くだけです。
+この翻訳も DB 無しでテストできます。「書き込みが制約違反を返す」ハンドラ `DbTest.runFailingWrite` を被せるだけです。
 
 ```scala:TestGeneratedPure.flix
-let taken = run {
-    DbError.runWithFailure(() -> Blog.registerUser({ name = "alice", email = "alice@example.com" }))
-} with handler SqlWrite {
-    def execute(_sql, _params, resume) = resume(Ok(0))
-    def executeReturning(_sql, _params, resume) = resume(Err(DbErrorKind.UniqueViolation("users_email_key")))
-};
-Assert.assertEq(expected = Ok(Err(RegisterError.EmailTaken("alice@example.com"))), taken)
+let register = () -> DbError.runWithFailure(() -> Blog.runRegister(() -> Blog.registerUser(alice)));
+let taken = DbTest.runFailingWrite(DbErrorKind.UniqueViolation("users_email_key"), register);
+let tooLong = DbTest.runFailingWrite(DbErrorKind.CheckViolation("users_name_length"), register);
+Assert.assertEq(
+    expected = (Ok(Err(RegisterFailure.EmailTaken("alice@example.com"))), Ok(Err(RegisterFailure.NameTooLong))),
+    (taken, tooLong))
 ```
 
-ハンドラの各オペレーションは第 3 引数に `resume` を受け取り、`resume(値)` でオペレーションを呼んだ場所へ値を返して続行させます。モックの return に相当します。失敗は `resume(Err(...))` で値として返します（ハンドラ本体で `DbErr` を投げると、`registerUser` の中の `runWithKind` には届きません）。
+`Blog.runRegister` は `RegisterErr` を `Result` に落とす境界用の関数です。`runFailingWrite` の中身は `SqlWrite` のハンドラで、各オペレーションは第 3 引数に `resume` を受け取り、`resume(Err(...))` で失敗を値としてオペレーションを呼んだ場所へ返します。モックの return に相当します。
 
 ## 5. トランザクションと境界
 
