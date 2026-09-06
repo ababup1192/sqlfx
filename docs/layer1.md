@@ -78,7 +78,7 @@ Fragment.then(Fragment.asc(UsersTable.name()), Fragment.desc(UsersTable.id()))
 
 ## デモ（examples/blog）
 
-flix.toml を持つ独立した Flix プロジェクト。本体は `make vendor` で `../../src/Db` と `../../src/Q` を `src/flix_db/` に写して使う
+flix.toml を持つ独立した Flix プロジェクト。本体は `make vendor` で `../../src/Db` と `../../src/Q` を `src/sqlfx/` に写して使う
 （flix.toml の依存は GitHub のリリースしか指せず、`lib/` の .fpkg は flix.toml があると読まれないため）。
 `make gen` で `src/Gen/` を作り直し、`make test` が DB 無し → 実 PG の順に回す。生成物が最新かは本体側の `gen --check`（`make gen-check`）と `test/Q/TestGen.flix` で確かめる。生成物の形を決めているのは Codegen なので、デモ側にはこの検査を置かない。
 テストは「.q から生成した関数を使う版」（`Blog` / TestGenerated*）と「生 SQL をインラインで書く版」（`BlogRaw` / TestRawSql*）の 2 系統で、同じ筋書きを両方で通す。

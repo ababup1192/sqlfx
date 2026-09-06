@@ -10,17 +10,17 @@ mod BlogTestSupport {
     use DbError.DbFailure
 
     ///
-    /// 接続設定。FLIX_DB_TEST_DSN が無ければ即 panic。
+    /// 接続設定。SQLFX_TEST_DSN が無ければ即 panic。
     ///
     pub def pgConfig(): Jdbc.ConnectionConfig \ IO =
         run {
-            match Sys.Env.getVar("FLIX_DB_TEST_DSN") {
+            match Sys.Env.getVar("SQLFX_TEST_DSN") {
                 case Some(url) => {
                     url = url,
-                    user = Sys.Env.getVar("FLIX_DB_TEST_USER") |> Option.getWithDefault("flix"),
-                    password = Sys.Env.getVar("FLIX_DB_TEST_PASSWORD") |> Option.getWithDefault("flix")
+                    user = Sys.Env.getVar("SQLFX_TEST_USER") |> Option.getWithDefault("flix"),
+                    password = Sys.Env.getVar("SQLFX_TEST_PASSWORD") |> Option.getWithDefault("flix")
                 }
-                case None => bug!("FLIX_DB_TEST_DSN が無い。make test-pg で回す")
+                case None => bug!("SQLFX_TEST_DSN が無い。make test-pg で回す")
             }
         } with Sys.Env.runWithIO
 

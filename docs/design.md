@@ -1,6 +1,6 @@
 # Flix DBライブラリ 設計概要
 
-長い設計検討の到達点をまとめる。名前は仮に `tlens-db` とせず「本ライブラリ」と書く。
+長い設計検討の到達点をまとめる。名前は仮に `sqlfx` とせず「本ライブラリ」と書く。
 対象は PostgreSQL・JVM(JDBC)・Flix。
 
 ---
@@ -193,7 +193,7 @@ belongs-to は素直に JOIN を書く(行が増えないので)。has-many を�
 
 - 履歴テーブル(version + checksum)、昇順適用、歯抜け検出、改竄検出
 - PG の DDL トランザクションで applyOne を包む(半分適用が存在しない)。
-  `-- tlens: no-tx` 注釈で CREATE INDEX CONCURRENTLY 等を非Tx適用
+  `-- sqlfx: no-tx` 注釈で CREATE INDEX CONCURRENTLY 等を非Tx適用
 - `migrate --dry` の目玉: 机上でスキーマを進め、**壊れる .q クエリを適用前に列挙**
   (.q 検証器の再利用)+ DDL 危険度警告(ロック・全行書き換えの見積もり)
 - 起動時にスキーマハッシュ照合 → 不一致は `DbErr.schemaMismatch`

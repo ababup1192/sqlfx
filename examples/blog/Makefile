@@ -2,11 +2,11 @@
 
 FLIX = ../../bin/flix
 COMPOSE = docker compose -f ../../docker-compose.yml
-PG_ENV = FLIX_DB_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/flix_db FLIX_DB_TEST_USER=flix FLIX_DB_TEST_PASSWORD=flix
+PG_ENV = SQLFX_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_TEST_USER=flix SQLFX_TEST_PASSWORD=flix
 
-# flix_db 本体を src/flix_db/ に写す（flix.toml がローカル依存を指せないため）
+# sqlfx 本体を src/sqlfx/ に写す（flix.toml がローカル依存を指せないため）
 vendor:
-	rm -rf src/flix_db && mkdir -p src/flix_db && cp -R ../../src/Db ../../src/Q src/flix_db/
+	rm -rf src/sqlfx && mkdir -p src/sqlfx && cp -R ../../src/Db ../../src/Q src/sqlfx/
 
 # migrations と queries/*.q から src/Gen/ を作り直す（生成器は本体の main）
 gen:

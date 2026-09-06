@@ -1,4 +1,4 @@
-# flix_db 実装プラン
+# sqlfx 実装プラン
 
 設計の正は [docs/design.md](docs/design.md)、層0 の API は [docs/layer0.md](docs/layer0.md)。
 このファイルはそれを「どの順で・何を確かめながら作るか」に落とした物。
@@ -73,7 +73,7 @@
    - `RawSql` エフェクトで生 SQL を標識化（`Fragment.rawPred`、`RawSql.runWithAllow`）
 5. [ ] **CI 検証**: 実 PG に全 `.q` を `PREPARE`（実行なし）
 6. [x] デモプロジェクト `examples/blog/`（flix.toml 付きの独立プロジェクト。migrations + .q + 生成物 + ユースケース、
-   生成コード版と生 SQL 版の 2 系統で DB 無し / 実 PG のテスト。本体は `make vendor` で src/flix_db/ に写す）
+   生成コード版と生 SQL 版の 2 系統で DB 無し / 実 PG のテスト。本体は `make vendor` で src/sqlfx/ に写す）
 
 残り: 5。`keyed` からの preloader 生成はフェーズ 3。
 
@@ -89,7 +89,7 @@
 ## フェーズ 4: マイグレーション = v3（§8）
 
 1. 履歴テーブル（version + checksum）、昇順適用、歯抜け・改竄検出
-2. `applyOne` を DDL トランザクションで包む。`-- tlens: no-tx` 注釈
+2. `applyOne` を DDL トランザクションで包む。`-- sqlfx: no-tx` 注釈
 3. `plan` / `analyzeImpact` は純粋関数（DB 無しでテスト）
 4. `migrate --dry`: 机上でスキーマを進め、壊れる `.q` を列挙（フェーズ 2 の検証器を再利用）+ DDL 危険度警告
 5. 起動時のスキーマハッシュ照合 → `DbErr.schemaMismatch`

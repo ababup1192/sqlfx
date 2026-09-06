@@ -1,6 +1,6 @@
 [package]
 name        = "blog"
-description = "flix_db のデモ。migrations と .q から生成した関数でブログの DB を読み書きする"
+description = "sqlfx のデモ。migrations と .q から生成した関数でブログの DB を読み書きする"
 version     = "0.1.0"
 flix        = "0.75.3"
 authors     = ["abab <ababup1192@gmail.com>"]
@@ -8,6 +8,6 @@ authors     = ["abab <ababup1192@gmail.com>"]
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
 
-# flix_db 本体は `make vendor` で ../../src/Db と ../../src/Q を src/flix_db/ に写して使う。
+# sqlfx 本体は `make vendor` で ../../src/Db と ../../src/Q を src/sqlfx/ に写して使う。
 # WhyNot: flix.toml の [dependencies] は GitHub のリリースしか指せず、lib/ の .fpkg は flix.toml があると読まれない。
-# 本体を GitHub にリリースしたら [dependencies] "github:ababup1192/flix_db" = "x.y.z" に置き換える。
+# 本体を GitHub にリリースしたら [dependencies] "github:ababup1192/sqlfx" = "x.y.z" に置き換える。

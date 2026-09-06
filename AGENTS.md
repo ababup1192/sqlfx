@@ -1,4 +1,4 @@
-# flix_db
+# sqlfx
 
 Flix の PostgreSQL 向け DB ライブラリ。設計は [docs/design.md](docs/design.md)、
 実装の進め方は [PLAN.md](PLAN.md)。

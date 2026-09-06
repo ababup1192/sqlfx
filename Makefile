@@ -22,7 +22,7 @@ test-unit:
 
 # 実 PostgreSQL に当たるテスト。コンテナを立て、test/ を全部（test/Pg/ 込み）回し、終わったらコンテナを止める。
 # WhyNot: flix test にはテストの絞り込みが無いので、DB 無しの分も一緒に走る。
-PG_ENV = FLIX_DB_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/flix_db FLIX_DB_TEST_USER=flix FLIX_DB_TEST_PASSWORD=flix
+PG_ENV = SQLFX_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_TEST_USER=flix SQLFX_TEST_PASSWORD=flix
 
 test-pg:
 	docker compose up -d --wait
