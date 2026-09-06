@@ -1,4 +1,4 @@
-.PHONY: vendor gen gen-check check test test-unit test-pg db-up db-down
+.PHONY: vendor gen gen-check migrate migrate-check migrate-status check test test-unit test-pg db-up db-down
 
 FLIX = ../../bin/flix
 COMPOSE = docker compose -f ../../docker-compose.yml
@@ -15,6 +15,18 @@ gen:
 # 生成物が最新か（書かない。本体の make test-unit でも同じ検査が走る）
 gen-check:
 	cd ../.. && bin/flix run -- gen --check examples/blog/migrations examples/blog/queries examples/blog/src/Gen
+
+# migrations/ を docker の PG に当てる（db-up の後で）。接続先は PG_ENV と同じ
+MIGRATE_ENV = SQLFX_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_USER=flix SQLFX_PASSWORD=flix
+
+migrate:
+	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate examples/blog/migrations
+
+migrate-check:
+	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate --check examples/blog/migrations
+
+migrate-status:
+	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate --status examples/blog/migrations
 
 check: vendor
 	$(FLIX) check

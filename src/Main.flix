@@ -1,6 +1,7 @@
 ///
 /// `bin/flix run -- gen <migrations/> <queries/> <out/>`: migrations でスキーマを組み、queries の .q から Flix を生成する。
 /// `gen --check ...` は書かずに、生成物が最新かだけを確かめる（CI 用。古ければ終了コード 1）。
+/// `migrate [--check | --status] <migrations/>`: migrations を DB に当てる。接続先は環境変数 SQLFX_DSN / SQLFX_USER / SQLFX_PASSWORD。
 /// 生成器を別プロジェクトにしないのは、flix.toml にローカルパス依存が無いから（PLAN フェーズ 2-3）。
 ///
 def main(): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.FileRead.FileRead, Fs.FileWrite.FileWrite} =
@@ -8,14 +9,72 @@ def main(): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.FileR
         match Sys.Env.getArgs() {
             case "gen" :: migrationsDir :: queriesDir :: outDir :: Nil => Gen.generateAll({ migrations = migrationsDir, queries = queriesDir, out = outDir })
             case "gen" :: "--check" :: migrationsDir :: queriesDir :: outDir :: Nil => Gen.checkAll({ migrations = migrationsDir, queries = queriesDir, out = outDir })
+            case "migrate" :: migrationsDir :: Nil => MigrateCli.applyAll(migrationsDir)
+            case "migrate" :: "--check" :: migrationsDir :: Nil => MigrateCli.checkAll(migrationsDir)
+            case "migrate" :: "--status" :: migrationsDir :: Nil => MigrateCli.showStatus(migrationsDir)
             case _ => {
                 println("usage: bin/flix run -- gen [--check] <migrations dir> <queries dir> <out dir>");
+                println("       bin/flix run -- migrate [--check | --status] <migrations dir>   (SQLFX_DSN / SQLFX_USER / SQLFX_PASSWORD)");
                 Sys.Exit.exit(2)
             }
         }
     } with Fs.ReadFile.runWithFileRead
       with Fs.WriteFile.runWithFileWrite
       with Fs.MkDirs.runWithFileWrite
+
+mod MigrateCli {
+
+    use Migrate.Status
+
+    ///
+    /// 未適用を当てて、当てた version を表示する。失敗は表示して終了コード 1。
+    ///
+    pub def applyAll(dir: String): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.ReadFile.ReadFile} =
+        let config = Migrate.defaultConfig(connectionFromEnv());
+        match runToResult(() -> Migrate.apply(config, dir)) {
+            case Ok(Nil) => println("up to date")
+            case Ok(applied) => List.forEach(version -> println("applied ${version}"), applied)
+            case Err(message) => { println("error: ${message}"); Sys.Exit.exit(1) }
+        }
+
+    ///
+    /// 未適用・不一致・欠落があれば表示して終了コード 1。CI と起動前の確認用。
+    ///
+    pub def checkAll(dir: String): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.ReadFile.ReadFile} =
+        match runToResult(() -> Jdbc.withConnection(connectionFromEnv(), conn -> Migrate.check(conn, dir))) {
+            case Ok(()) => println("up to date")
+            case Err(message) => { println("error: ${message}"); Sys.Exit.exit(1) }
+        }
+
+    ///
+    /// 全ファイルの状態を並べる。常に終了コード 0。
+    ///
+    pub def showStatus(dir: String): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.ReadFile.ReadFile} =
+        match runToResult(() -> Jdbc.withConnection(connectionFromEnv(), conn -> Migrate.status(conn, dir))) {
+            case Ok(statuses) => List.forEach(status -> println(describe(status)), statuses)
+            case Err(message) => { println("error: ${message}"); Sys.Exit.exit(1) }
+        }
+
+    def describe(status: Status): String = match status {
+        case Status.Applied(version, _, ms) => "applied  ${version}  (${ms} ms)"
+        case Status.Pending(version) => "pending  ${version}"
+    }
+
+    def runToResult(thunk: Unit -> a \ ef): Result[String, a] \ ef - {Migrate.MigrateErr, TransientDbErr, DbErr} =
+        Migrate.runWithResult(() -> DbError.runWithFailure(thunk) |> Result.mapErr(failure -> "${failure}"))
+            |> Result.flatMap(identity)
+
+    def connectionFromEnv(): Jdbc.ConnectionConfig \ {IO, Sys.Env.Env, Sys.Exit.Exit} =
+        match Sys.Env.getVar("SQLFX_DSN") {
+            case Some(url) => {
+                url = url,
+                user = Sys.Env.getVar("SQLFX_USER") |> Option.getWithDefault(""),
+                password = Sys.Env.getVar("SQLFX_PASSWORD") |> Option.getWithDefault("")
+            }
+            case None => { println("error: SQLFX_DSN is not set (jdbc:postgresql://host:port/db)"); Sys.Exit.exit(2) }
+        }
+
+}
 
 mod Gen {
 

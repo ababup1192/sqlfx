@@ -34,9 +34,10 @@ Flix の PostgreSQL 向け DB ライブラリ。SQL はそのまま書き、文�
 4. [動的な条件（断片 DSL）](#4-動的な条件断片-dsl)
 5. [生 SQL で書く（逃げ道）](#5-生-sql-で書く逃げ道)
 6. [エラーの扱い](#6-エラーの扱い)
-7. [Tx と再実行](#7-tx-と再実行)
-8. [テストの書き方](#8-テストの書き方)
-9. [make の一覧とディレクトリ](#9-make-の一覧とディレクトリ)
+7. [migrate](#7-migrate)
+8. [Tx と再実行](#8-tx-と再実行)
+9. [テストの書き方](#9-テストの書き方)
+10. [make の一覧とディレクトリ](#10-make-の一覧とディレクトリ)
 
 ## 1. 準備
 
@@ -353,7 +354,28 @@ enum に無い名前の違反（本番に手で足した制約など）と、制
 
 境界（main / HTTP ハンドラ / テスト）で 1 層の `Result` にするには `DbError.runWithFailure`。業務エラーは `run … with handler RegisterErr { … }` で受ける。
 
-## 7. Tx と再実行
+## 7. migrate
+
+`migrations/*.sql` を DB に当てる。`gen` と同じファイルを読むが、パーサは通さず JDBC にそのまま渡す（関数やトリガも当たる）。
+前進のみ。適用済みは `sqlfx_migrations(version, checksum, applied_at, execution_ms, applied_by)` に記録する。
+
+```
+$ SQLFX_DSN=jdbc:postgresql://127.0.0.1:5432/blog SQLFX_USER=flix SQLFX_PASSWORD=flix \
+    bin/flix run -- migrate migrations/            # 未適用を番号順に当てる
+    bin/flix run -- migrate --check migrations/    # 未適用・不一致・欠落があれば exit 1（CI と起動前）
+    bin/flix run -- migrate --status migrations/   # 一覧
+```
+
+- ファイル名は `NNN_name.sql`（3 桁以上のゼロ埋め）。文字列順で並べても番号順になる形に固定する。記録に無いファイルは番号が小さくても当てる（ブランチのマージで割り込む）
+- 1 ファイル 1 Tx。全文と記録の INSERT を同じ Tx に入れるので「当たったのに記録が無い」は起きない。途中で失敗したらそのファイルと後続は未適用のまま
+- 先頭行が `-- sqlfx:no-transaction` のファイルは Tx 無し（`CREATE INDEX CONCURRENTLY` 用）。1 文だけにし、`IF NOT EXISTS` で冪等に書く
+- 適用済みのファイルが書き換わっていれば `checksumMismatch` で止まる（CRLF、行末の空白、末尾の空行は無視）。記録にあるがファイルが無ければ `missingFile`
+- 専用の接続を 1 本開き、`SET lock_timeout`（既定 10 秒）と `pg_advisory_lock` を取ってから当てる。複数台が同時に走っても 1 つずつ。プールの接続は使わない
+
+アプリからは `Migrate.apply(Migrate.defaultConfig(config), "migrations")` と `Migrate.check(conn, "migrations")`。推奨は「デプロイの手順で apply、起動時に check」。
+失敗は `DbErr` と `MigrateErr`（`checksumMismatch` / `missingFile` / `invalidFileName` / `pending`）で型に出る。境界では `Migrate.runWithResult`。
+
+## 8. Tx と再実行
 
 ```flix
 let pool = Pool.open(Pool.defaultConfig(config));   // 起動時に 1 回。終了時に Pool.close
@@ -384,7 +406,7 @@ COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続�
 - 業務エラー（`RegisterErr` のようなエフェクト）は service 層で翻訳し、controller のハンドラで HTTP のステータスに写す。検証（`Validation`）のエラーと同じ型にまとめる例が `examples/blog/src/BlogForm.flix`
 - 発行 SQL と件数の記録は `DbTest.runLogging` を縁に被せる。`statement_timeout` の口は未実装
 
-## 8. テストの書き方
+## 9. テストの書き方
 
 同じ関数を、ハンドラを変えて走らせる。関数側は変えない。
 
@@ -408,7 +430,7 @@ run {
 実 PG のテストは `test/Pg/` に置き、`make test-pg` がコンテナを立てて回す。決まったテストデータを入れてから、各クエリの結果を丸ごと比べる形が読みやすい（`examples/blog/test/Pg/TestQueriesPg.flix`）。
 Flix のレコードは `Eq` を持たないので、期待値は `Views.user({ id = ..., name = ... })` のように enum に写して比べる。
 
-## 9. make の一覧とディレクトリ
+## 10. make の一覧とディレクトリ
 
 ```bash
 make check         # 型検査

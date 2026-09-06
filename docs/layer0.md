@@ -41,6 +41,7 @@ Decoder（純粋）  Row -> Result[DecodeError, a]
 | `src/Db/Jdbc/JdbcConvert.flix` | `mod JdbcConvert`: `SqlValue` ⇔ JDBC の変換（Java 型はここに閉じる） |
 | `src/Db/Jdbc/Jdbc.flix` | `mod Jdbc`: `runWithConnection` / `withConnection`（1 回だけ開く） |
 | `src/Db/Jdbc/Pool.flix` | `mod Pool`: HikariCP を包んだ接続プール。`open` / `close` / `withConnection`（借りて返す） |
+| `src/Db/Migrate.flix` | `mod Migrate`: migrations/*.sql を DB に当てる。`apply` / `check` / `status`、記録は `sqlfx_migrations` |
 | `src/Db/Test/DbTest.flix` | `runWithRows` / `runRecording` / `runLogging`（1 モジュール 1 宣言なので 1 ファイル） |
 
 ## 値: `SqlValue`

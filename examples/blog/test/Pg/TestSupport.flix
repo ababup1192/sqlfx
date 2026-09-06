@@ -25,30 +25,31 @@ mod BlogTestSupport {
         } with Sys.Env.runWithIO
 
     ///
-    /// migrations/ を読んで、テーブルを作り直す。
+    /// テーブルを消して migrations/ を Migrate.apply で当て直す。migrate 自体もここで毎回通る。
     ///
-    pub def resetSchema(): Unit \ DbWrite + RawSql + Fs.FileRead.FileRead =
-        let _ = Sql.execute("DROP TABLE IF EXISTS posts, users CASCADE", Nil);
-        run {
-            List#{"001_users.sql", "002_posts.sql", "003_posts_views.sql"}
-                |> List.forEach(file ->
-                    Fs.ReadFile.read("migrations/${file}")
-                        |> Result.getWithDefault("")
-                        |> DdlParser.splitStatements
-                        |> List.forEach(statement -> { let _ = Sql.execute(statement, Nil); () }))
+    pub def resetSchema(): Unit \ DbWrite + RawSql + IO =
+        let _ = Sql.execute("DROP TABLE IF EXISTS posts, users, sqlfx_migrations CASCADE", Nil);
+        let applied = run {
+            Migrate.runWithResult(() -> Migrate.apply(Migrate.defaultConfig(pgConfig()), "migrations"))
         } with Fs.ReadFile.runWithFileRead
+          with Fs.FileRead.runWithIO
+          with Fs.DirList.runWithIO;
+        match applied {
+            case Ok(_) => ()
+            case Err(message) => bug!("migrate failed: ${message}")
+        }
 
     ///
     /// テーブルを作り直し、接続を開いて body を走らせ、必ず閉じる。失敗は DbFailure に落とす。
     /// テストは全部同じ users / posts を作り直すので、直列に走る前提。
     ///
-    pub def withDb(body: Unit -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + {IO, Fs.FileRead.FileRead} =
+    pub def withDb(body: Unit -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + IO =
         withConn(_ -> body())
 
     ///
     /// withDb と同じだが、Tx を張りたいテスト向けに接続も渡す。
     ///
-    pub def withConn(body: Connection -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + {IO, Fs.FileRead.FileRead} =
+    pub def withConn(body: Connection -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + IO =
         DbError.runWithFailure(() -> RawSql.runWithAllow(() -> Jdbc.withConnection(pgConfig(), conn -> {
             resetSchema();
             body(conn)
@@ -79,7 +80,7 @@ mod BlogTestSupport {
     ///
     /// テーブルを作り直し、seed を入れてから body を走らせる。
     ///
-    pub def withSeed(body: Unit -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + {IO, Fs.FileRead.FileRead} =
+    pub def withSeed(body: Unit -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + IO =
         withDb(() -> { seed(); body() })
 
     ///
