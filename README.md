@@ -12,7 +12,7 @@ Flix の PostgreSQL 向け DB ライブラリ。SQL はそのまま書き、文�
         │ SqlWrite.execute（op）
         ▼
    ┌──────────── ハンドラ（差し替え自由）────────────┐
-   │  Jdbc.withConnection   本番。PostgreSQL へ      │
+   │  Pool.withConnection   本番。PostgreSQL へ      │
    │  DbTest.runWithRows    単体。決めた行を返す      │
    │  DbTest.runRecording   発行した SQL を記録       │
    └─────────────────────────────────────────────┘
@@ -356,13 +356,17 @@ enum に無い名前の違反（本番に手で足した制約など）と、制
 ## 7. Tx と再実行
 
 ```flix
-Retry.withRetry(3, () ->                            // Transient なら thunk を最初から呼び直す（接続も取り直す）
-    Jdbc.withConnection(config, conn ->             // 開いて、必ず閉じる
+let pool = Pool.open(Pool.defaultConfig(config));   // 起動時に 1 回。終了時に Pool.close
+
+Retry.withRetry(3, () ->                            // Transient なら thunk を最初から呼び直す（接続も借り直す）
+    Pool.withConnection(pool, conn ->               // プールから借りて、必ず返す
         UsersTable.onConstraint(translate, () ->    // 制約違反の翻訳は Tx の外
             Tx.withTx(conn, () ->                   // BEGIN / COMMIT。失敗なら ROLLBACK して再送出
                 Blog.removeUser(1i64)))))
 ```
 
+`Pool` は HikariCP を包んだ物。接続数の上限を超えた借り出しは `borrowTimeoutMs` 待って `TransientDbErr.timeout` になる。
+CLI やテストのように 1 回だけ開くなら `Jdbc.withConnection(config, conn -> ...)`（毎回接続する）。
 `withRetry` を `withConnection` の外に置くのは、`connectionLost` した接続で再試行しても無駄だから。
 
 ```
@@ -376,9 +380,9 @@ COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続�
 
 ### Web から使うときの前提
 
-- 縁（全ハンドラ共通）で `DbError.runWithFailure`（→ 500 / 503）、`Retry.withRetry`、`Jdbc.withConnection`、`RawSql.runWithAllow` を重ね、ハンドラごとに書くのは検証と Tx の範囲と制約違反の翻訳
+- 縁（全ハンドラ共通）で `DbError.runWithFailure`（→ 500 / 503）、`Retry.withRetry`、`Pool.withConnection`、`RawSql.runWithAllow` を重ね、ハンドラごとに書くのは検証と Tx の範囲と制約違反の翻訳
 - 業務エラー（`RegisterErr` のようなエフェクト）は service 層で翻訳し、controller のハンドラで HTTP のステータスに写す。検証（`Validation`）のエラーと同じ型にまとめる例が `examples/blog/src/BlogForm.flix`
-- 発行 SQL と件数の記録は `DbTest.runLogging` を縁に被せる。接続プールと `statement_timeout` の口は未実装（`withConnection` は毎回接続する）
+- 発行 SQL と件数の記録は `DbTest.runLogging` を縁に被せる。`statement_timeout` の口は未実装
 
 ## 8. テストの書き方
 

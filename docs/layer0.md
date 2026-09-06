@@ -39,7 +39,8 @@ Decoder（純粋）  Row -> Result[DecodeError, a]
 | `src/Db/Tx.flix` | `Tx.withTx` |
 | `src/Db/Jdbc/SqlState.flix` | `mod SqlState`: sqlstate → `DbErrorKind`（純粋） |
 | `src/Db/Jdbc/JdbcConvert.flix` | `mod JdbcConvert`: `SqlValue` ⇔ JDBC の変換（Java 型はここに閉じる） |
-| `src/Db/Jdbc/Jdbc.flix` | `mod Jdbc`: `runWithConnection` |
+| `src/Db/Jdbc/Jdbc.flix` | `mod Jdbc`: `runWithConnection` / `withConnection`（1 回だけ開く） |
+| `src/Db/Jdbc/Pool.flix` | `mod Pool`: HikariCP を包んだ接続プール。`open` / `close` / `withConnection`（借りて返す） |
 | `src/Db/Test/DbTest.flix` | `runWithRows` / `runRecording` / `runLogging`（1 モジュール 1 宣言なので 1 ファイル） |
 
 ## 値: `SqlValue`

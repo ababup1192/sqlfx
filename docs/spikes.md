@@ -71,3 +71,9 @@ run { Ok(run { inner() } with handler Op { def op(_k) = Fail.fail() }) } with ha
 - 演算子に使える文字は `= < > ! | & $ ^ * - + /`。`.` `:` `~` は使えない（`>.` `>:` `=~` は lexer error）
 - `===` `=!=` `<<` `<<=` `>>` `>>=` は定義できて中置で使える。`a Fragment.>> b` の修飾付き中置は書けず、`use Fragment.{>>}` が要る
 - `>>` は Prelude の関数合成と同じ綴りだが、`use Fragment.{>>}` を書いた関数の中だけ列比較になり、書いていない関数では合成のまま
+
+## HikariCP を Flix から使う（2026-09-06）
+
+- `HikariConfig.setJdbcUrl` はドライバをクラス名で探すので Flix の Maven クラスローダでは効かない（`Jdbc.connect` と同じ）。`PGSimpleDataSource` を作って `setDataSource` で渡せば動く
+- HikariCP は SLF4J で書く。束縛が無いと最初の利用時に「StaticLoggerBinder が無い」警告を標準エラーへ出し、`flix test` はそれを失敗（Std Err Output）にする。`org.slf4j:slf4j-nop` を足して黙らせた
+- 上限まで借りている間の借り出しは `connectionTimeout` 後に SQLException（"request timed out"）。TransientDbErr.timeout に翻訳。閉じたプールからの借り出しは connectionLost
