@@ -67,4 +67,4 @@ pkg:
 VERSION = $(shell sed -n 's/^version *= *"\(.*\)"/\1/p' flix.toml)
 
 release: pkg
-	gh release create v$(VERSION) $(PKG_DIR)/artifact/sqlfx.fpkg --title "v$(VERSION)" --notes "sqlfx $(VERSION)"
+	gh release create v$(VERSION) $(PKG_DIR)/artifact/sqlfx.fpkg $(PKG_DIR)/artifact/flix.toml --title "v$(VERSION)" --notes "sqlfx $(VERSION)"
