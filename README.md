@@ -188,7 +188,7 @@ def activeUsersNamed(search: { prefix = String, limit = Int64 }): List[SearchUse
   searchUsers(10, filter, order)
      │
      │  filter = both(isNull(deletedAt), like(name, "a%"))
-     │  order  = then(asc(name), desc(id))
+     │  order  = asc(name) |> thenDesc(id)
      ▼
   SELECT ... WHERE deleted_at IS NULL AND ((deleted_at IS NULL) AND (name LIKE $2))
              ORDER BY name ASC, id DESC
@@ -197,12 +197,50 @@ def activeUsersNamed(search: { prefix = String, limit = Int64 }): List[SearchUse
 
 | 比較 | 述語 | 並び順 |
 |---|---|---|
-| `=== =!= << <<= >> >>=`（左は列、右は列か `value(x)`） | `like inList` | `asc desc then` |
+| `=== =!= << <<= >> >>=`（左は列、右は列か `value(x)`） | `like inList` | `asc desc` |
+| | | `thenAsc thenDesc`（`asc(a) \|> thenDesc(b)` でキーを足す） |
 | | `isNull isNotNull`（NULL 可の列だけ） | `unordered()` |
 | | `both either negate`（`and` `or` `not` は予約語） | |
 | | `when(cond, pred)` `all(preds)` `any(preds)` `always()` | |
 
 `both` は `always()` を消して繋ぐので、`when` が偽のときに `TRUE AND` が SQL に残らない。`inList` の空は `FALSE`。
+
+### 部分更新（`Changes`）
+
+UPDATE の SET 句も slot にできる。編集フォームの「触った項目だけ書き換える」を、項目の組み合わせごとに query を書かずに済ませる。
+
+```
+query updatePost(id: Int64) -> exec with changes: Changes[posts] {
+    UPDATE posts SET updated_at = now(), {changes} WHERE id = :id
+}
+```
+
+```flix
+type alias PostEdit = { title = Option[String], body = Option[String], published = Option[Bool] }   // None は「触っていない」
+
+def editPost(id: Int64, edit: PostEdit): Int32 \ DbWrite =
+    Fragment.noChange()
+        |> Fragment.setIfSome(PostsTable.title(), edit#title)        // Some なら代入、None は触らない
+        |> Fragment.setIfSome(PostsTable.body(), edit#body)
+        |> Fragment.setIfSome(PostsTable.published(), edit#published)
+        |> PostsQueries.updatePost(id)                               // SET updated_at = now(), title = $2 WHERE id = $1
+```
+
+| 関数 | SQL | 型で守る物 |
+|---|---|---|
+| `set(col, x)` | `col = $n` | 列と値の型 |
+| `setNull(col)` | `col = NULL` | NULL 可の列だけ |
+| `setIfSome(col, opt)` | Some なら `set`、None は触らない | フォームの未入力用 |
+| `setOrNull(col, opt)` | Some なら `set`、None は `setNull` | 行型の `Option` を書き戻す用。NULL 可の列だけ |
+| `increment(col, by)` | `col = col + $n` | 数値の列だけ |
+| `rawSet(sql)` | そのまま | 呼ぶ側に `RawSql` が付く |
+
+どれも積み上げ先の `Changes` を最後に受けるので、`noChange()` から `|>` で 1 行 1 列に書ける。
+
+- **`setIfSome` と `setOrNull` を間違えない**。SELECT の行型は NULL 可の列を `Option[a]` で持つ。それを `setIfSome` に渡すと型は通るが、NULL が「変えない」になる。行の値を書き戻すなら `setOrNull`
+- **空なら DB に出さず 0 を返す**。`SET updated_at = now(), {changes}` のように固定の代入と並べても壊れない。「行が無い」も 0 なので、区別したければ先に `one` で読む
+- 同じ列を 2 回代入したら後の物だけ出す。`rawSet` と `.q` に書いた固定の代入は畳まないので、重ねると PG がエラーにする
+- `Changes[t]` は `-> exec` の UPDATE で、UPDATE 直後のテーブル `t` にだけ置ける。それ以外は生成時にエラー。RETURNING 付きは v2
 
 列の型は `Col[UsersTable, String, NotNull]` のように、テーブル・Flix の型・NULL 可否の 3 つを持つ。DDL の `NOT NULL` を生成器が写す。値は `Fragment.value(x)` で同じ型の項にする。
 

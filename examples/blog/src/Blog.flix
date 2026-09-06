@@ -126,6 +126,32 @@ mod Blog {
         inserted
 
     ///
+    /// 記事の編集フォーム。None は「触っていない」。
+    ///
+    /// - `title`: 題名
+    /// - `body`: 本文
+    /// - `published`: 公開するか
+    ///
+    pub type alias PostEdit = { title = Option[String], body = Option[String], published = Option[Bool] }
+
+    ///
+    /// 記事を編集する。触った項目だけ UPDATE に出る。何も触っていなければ DB に出さず 0。
+    /// 「記事が無い」と「何も触っていない」はどちらも 0 なので、区別したければ先に postWithAuthor で読む。
+    ///
+    pub def editPost(id: Int64, edit: PostEdit): Int32 \ DbWrite =
+        Fragment.noChange()
+            |> Fragment.setIfSome(PostsTable.title(), edit#title)
+            |> Fragment.setIfSome(PostsTable.body(), edit#body)
+            |> Fragment.setIfSome(PostsTable.published(), edit#published)
+            |> PostsQueries.updatePost(id)
+
+    ///
+    /// 投稿者の email を外す（NULL にする）。退会済みなら 0。
+    ///
+    pub def clearEmail(id: Int64): Int32 \ DbWrite =
+        Fragment.noChange() |> Fragment.setNull(UsersTable.email()) |> UsersQueries.updateUser(id)
+
+    ///
     /// 投稿者を退会させる。記事を消してから soft delete。1 つの Tx で呼ぶこと。
     /// 既に退会済みなら false。
     ///

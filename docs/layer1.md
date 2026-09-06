@@ -20,7 +20,7 @@ src/Main.flix  `bin/flix run -- gen <migrations> <queries> <out>`
 
 ```
 // 行コメント
-query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pred[テーブル] | Order[テーブル], ...] {
+query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pred[テーブル] | Order[テーブル] | Changes[テーブル], ...] {
     素の SQL。:name で引数、{slot} で断片
 }
 ```
@@ -28,6 +28,7 @@ query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pre
 - 型名は Flix の綴り: `Bool Int32 Int64 Float64 BigDecimal String Bytes Timestamp Date Uuid Json List[Int64] List[String]`
 - `:name` は宣言に無いとエラー、宣言して使わないのもエラー。`{slot}` も同じ。`'...'` の中と `::text` は触らない
 - `keyed` は `many` だけ。同じ名前の query は 1 ファイルに 1 つ
+- `Changes[t]` は `exec` の UPDATE で、UPDATE 直後のテーブル `t` にだけ置ける（`ChangesSlotRequiresExec` / `ChangesSlotNotUpdateTarget`）
 - `one` / `many` は SELECT か `RETURNING` 付きの書き込み、`exec` は `RETURNING` 無しの書き込み（v1 では CTE は未対応）
 - 本文の `--` から行末はコメントとして落ちる
 - query 名・引数名・slot 名は Flix の識別子になるので、予約語と生成コードの内部名（`sql` / `params` / `paramsN` / `xxxSql` / `sourceHash`）は生成時にエラー
@@ -70,21 +71,24 @@ pub def sourceHash(): Int32   // .q の中身のハッシュ。テストで現�
 - ファイル `users.q` → `mod UsersQueries`、テーブル `users` → `mod UsersTable`（印の enum と列の `Col`）
 - 列名は camelCase（`user_id` → `userId`）、予約語は末尾 `_`
 - 引数が 2 つ以上の query は 1 つのレコードで受ける（`insertUser({ name = "a", email = "a@x", role = "member" })`）。同じ型が並んでも取り違えない
-- slot は宣言順に引数の後ろへ。Pred は `Fragment.appendPred` で `$n` を続き番号で振り、Order は `Fragment.renderOrder`
+- slot は宣言順に引数の後ろへ。Pred は `Fragment.appendPred`、Changes は `Fragment.appendChanges` で `$n` を続き番号で振り、Order は `Fragment.renderOrder`
+- Changes の slot があれば `if (Fragment.isEmptyChanges(c)) 0 else { ... }` で包む（空の SET 句は構文エラー）
 
 ## 断片 DSL
 
 ```flix
 Fragment.both(Fragment.isNull(UsersTable.deletedAt()),
               Fragment.when(prefix != "", Fragment.like(UsersTable.name(), prefix + "%")))
-Fragment.then(Fragment.asc(UsersTable.name()), Fragment.desc(UsersTable.id()))
+Fragment.asc(UsersTable.name()) |> Fragment.thenDesc(UsersTable.id())
+Fragment.noChange() |> Fragment.setIfSome(PostsTable.title(), edit#title) |> Fragment.setNull(UsersTable.email())
 ```
 
 - 項は `Col[row, a, n]`。列なら `n` は `NotNull` か `Nullable`（生成器が DDL から写す）、`Fragment.value(x)` なら `Literal`
 - 比較は `=== =!= << <<= >> >>=`（`use Fragment.{>>}` が要る）。左辺は列（trait `IsColumn[n]`）、右辺は列か値。`a` と `row` が一致しないと型エラー、nullability は問わない。右が値なら `$n`、列なら列名をそのまま出す
 - `like inList` は関数。`isNull isNotNull` は `Col[row, a, Nullable]` にだけ書ける
 - 繋ぎ: `both either negate when all any always`。`always()` は TRUE で `both` はそれを消す、`inList` の空は FALSE
-- 並び順: `asc desc then unordered`、`unordered()` は ORDER BY を出さない
+- 並び順: `asc desc thenAsc thenDesc unordered`、`unordered()` は ORDER BY を出さない
+- SET 句: `noChange set setNull setIfSome setOrNull increment rawSet`。積み上げ先の `Changes` を最後に受ける。同じ列は後勝ち、`increment` は `IsNumber[a]` の列だけ、`setNull` / `setOrNull` は `Nullable` の列だけ
 - render は括弧全付け。値は必ず `$n` になり、識別子は `Col` からしか来ない
 - 生 SQL は `Fragment.rawPred(sql)` で、呼ぶ側に `RawSql` が付く。境界で `RawSql.runWithAllow`。生成関数は自分の SQL だけを `runWithAllow` で囲むので、slot に入れた `rawPred` は呼び出し側の型に残る
 

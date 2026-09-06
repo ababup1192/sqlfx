@@ -27,6 +27,11 @@ query addView(id: Int64) -> exec {
     UPDATE posts SET views = views + 1 WHERE id = :id
 }
 
+// 編集フォーム用。SET の中身は呼ぶ側が Changes で組む。空なら DB に出さず 0
+query updatePost(id: Int64) -> exec with changes: Changes[posts] {
+    UPDATE posts SET updated_at = now(), {changes} WHERE id = :id
+}
+
 query deletePostsOfUser(userId: Int64) -> exec {
     DELETE FROM posts WHERE user_id = :userId
 }

@@ -88,12 +88,64 @@ def testAppendPred(): Unit \ Assert =
         expected = ("(age = $2)", List#{SqlValue.Str("x"), SqlValue.Int32(3)}),
         Fragment.appendPred(ageCol() === Fragment.value(3), List#{SqlValue.Str("x")}))
 
-/// 並び順。Unordered は空文字、then で繋ぐ。
+/// 並び順。Unordered は空文字、thenAsc / thenDesc でキーを足す。
 @Test
 def testRenderOrder(): Unit \ Assert =
     Assert.assertEq(
         expected = List#{"", "ORDER BY name ASC, age DESC"},
-        List#{Fragment.renderOrder(Fragment.unordered()), Fragment.renderOrder(Fragment.then(Fragment.asc(nameCol()), Fragment.desc(ageCol())))})
+        List#{Fragment.renderOrder(Fragment.unordered()), Fragment.renderOrder(Fragment.asc(nameCol()) |> Fragment.thenDesc(ageCol()))})
+
+// ---- SET 句（Changes）----
+
+/// 代入は積んだ順に `col = $n` で並び、$n は既にある引数の続き番号。NULL はリテラル、increment は `col = col + $n`。
+@Test
+def testAppendChanges(): Unit \ Assert =
+    let changes = Fragment.noChange()
+        |> Fragment.set(nameCol(), "a")
+        |> Fragment.setNull(deletedAtCol())
+        |> Fragment.increment(ageCol(), 2);
+    Assert.assertEq(
+        expected = ("name = $2, deleted_at = NULL, age = age + $3", List#{SqlValue.Int64(9i64), SqlValue.Str("a"), SqlValue.Int32(2)}),
+        Fragment.appendChanges(changes, List#{SqlValue.Int64(9i64)}))
+
+/// setIfSome は None なら何も積まない。setOrNull は None なら NULL。
+@Test
+def testSetIfSomeAndSetOrNull(): Unit \ Assert =
+    let changes = Fragment.noChange()
+        |> Fragment.setIfSome(nameCol(), None)
+        |> Fragment.setIfSome(ageCol(), Some(3))
+        |> Fragment.setOrNull(deletedAtCol(), None);
+    Assert.assertEq(
+        expected = ("age = $1, deleted_at = NULL", List#{SqlValue.Int32(3)}),
+        Fragment.appendChanges(changes, Nil))
+
+/// 同じ列を 2 回代入したら後の物だけ、後の位置に出る。
+@Test
+def testChangesLastWins(): Unit \ Assert =
+    let changes = Fragment.noChange()
+        |> Fragment.set(nameCol(), "first")
+        |> Fragment.set(ageCol(), 1)
+        |> Fragment.set(nameCol(), "second");
+    Assert.assertEq(
+        expected = ("age = $1, name = $2", List#{SqlValue.Int32(1), SqlValue.Str("second")}),
+        Fragment.appendChanges(changes, Nil))
+
+/// 何も積まなければ空。setIfSome の None だけでも空。
+@Test
+def testEmptyChanges(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{true, true, false},
+        List#{
+            Fragment.isEmptyChanges(Fragment.noChange()),
+            Fragment.isEmptyChanges(Fragment.noChange() |> Fragment.setIfSome(nameCol(), None)),
+            Fragment.isEmptyChanges(Fragment.noChange() |> Fragment.set(nameCol(), "a"))
+        })
+
+/// rawSet は RawSql が要り、そのまま出る。同じ列でも畳まない。
+@Test
+def testRawSet(): Unit \ Assert =
+    let changes = RawSql.runWithAllow(() -> Fragment.noChange() |> Fragment.set(ageCol(), 0) |> Fragment.rawSet("age = age * 2"));
+    Assert.assertEq(expected = ("age = $1, age = age * 2", List#{SqlValue.Int32(0)}), Fragment.appendChanges(changes, Nil))
 
 /// 生 SQL は RawSql が要り、render では括弧に包まれる。
 @Test

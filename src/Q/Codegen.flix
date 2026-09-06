@@ -19,7 +19,7 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "4"
+    pub def version(): String = "5"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
@@ -195,27 +195,53 @@ mod Codegen {
                     "        let params0 = ${baseParams};" :: renderSlotLets(queryDef),
                     List#{
                         "        let sql = ${renderSqlConcat(queryDef)};",
-                        "        let params = params${List.length(List.filter(slot -> slot#kind == SlotKind.Pred, queryDef#slots))};",
+                        "        let params = params${List.length(List.filter(slot -> consumesParams(slot#kind), queryDef#slots))};",
                         "        ${call}"
-                    });
+                    }) |> skipWhenNoChanges(queryDef);
         List.join("\n", List.append(doc :: header :: body, List#{""}))
+
+    ///
+    /// Changes の slot がどれか空なら、文を DB に出さずに 0 を返す形に本体を包む。
+    /// 空の SET 句は構文エラーで、`SET updated_at = now(), {changes}` のように固定の代入と並べても壊れないようにするため。
+    ///
+    def skipWhenNoChanges(queryDef: Query, body: List[String]): List[String] =
+        match List.filter(slot -> slot#kind == SlotKind.Changes, queryDef#slots) {
+            case Nil => body
+            case changesSlots =>
+                let condition = changesSlots |> List.map(slot -> "Fragment.isEmptyChanges(${slot#name})") |> List.join(" or ");
+                List.append(
+                    "        if (${condition}) 0 else {" :: List.map(line -> "    " + line, body),
+                    List#{"        }"})
+        }
+
+    ///
+    /// `$n` の値を積む slot か。Order は SQL の文字列だけを出す。
+    ///
+    def consumesParams(kind: SlotKind): Bool = match kind {
+        case SlotKind.Pred => true
+        case SlotKind.Order => false
+        case SlotKind.Changes => true
+    }
 
     def slotFlixType(kind: SlotKind, table: String): String = match kind {
         case SlotKind.Pred => "Fragment.Pred[${tableModuleOf(table)}.${tableModuleOf(table)}]"
         case SlotKind.Order => "Fragment.Order[${tableModuleOf(table)}.${tableModuleOf(table)}]"
+        case SlotKind.Changes => "Fragment.Changes[${tableModuleOf(table)}.${tableModuleOf(table)}]"
     }
 
     ///
-    /// Pred の slot ごとに `let (filterSql, params1) = Fragment.appendPred(filter, params0);`、Order は `let orderSql = ...`。
+    /// Pred の slot ごとに `let (filterSql, params1) = Fragment.appendPred(filter, params0);`、Changes は appendChanges、Order は `let orderSql = ...`。
     ///
     def renderSlotLets(queryDef: Query): List[String] =
         let (lines, _) = List.foldLeft((state, slot) -> {
-            let (acc, predCount) = state;
+            let (acc, paramSlotCount) = state;
             match slot#kind {
                 case SlotKind.Pred =>
-                    ("        let (${slot#name}Sql, params${predCount + 1}) = Fragment.appendPred(${slot#name}, params${predCount});" :: acc, predCount + 1)
+                    ("        let (${slot#name}Sql, params${paramSlotCount + 1}) = Fragment.appendPred(${slot#name}, params${paramSlotCount});" :: acc, paramSlotCount + 1)
+                case SlotKind.Changes =>
+                    ("        let (${slot#name}Sql, params${paramSlotCount + 1}) = Fragment.appendChanges(${slot#name}, params${paramSlotCount});" :: acc, paramSlotCount + 1)
                 case SlotKind.Order =>
-                    ("        let ${slot#name}Sql = Fragment.renderOrder(${slot#name});" :: acc, predCount)
+                    ("        let ${slot#name}Sql = Fragment.renderOrder(${slot#name});" :: acc, paramSlotCount)
             }
         }, (Nil, 0), queryDef#slots);
         List.reverse(lines)

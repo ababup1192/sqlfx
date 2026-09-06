@@ -35,6 +35,7 @@ mod QRender {
 
     ///
     /// slot を空にしたときの置き文字。宣言に無い slot はパーサが弾くので、ここでは Pred 扱いにしない（空文字）。
+    /// Changes も空文字。`SET updated_at = now(), ` のように壊れた SET 句になるが、QResolve は SET 句を読まないので困らない。
     ///
     def slotPlaceholder(queryDef: Query, name: String): String =
         queryDef#slots
@@ -42,6 +43,7 @@ mod QRender {
             |> Option.map(slot -> match slot#kind {
                 case SlotKind.Pred => "TRUE"
                 case SlotKind.Order => ""
+                case SlotKind.Changes => ""
             })
             |> Option.getWithDefault("")
 

@@ -16,6 +16,20 @@ def testUsersWithPostsIsTwoQueries(): Unit \ Assert =
         expected = (Ok(List#{("alice", List#{10i64, 11i64}), ("bob", Nil), ("carol", List#{12i64})}), 2),
         (shape, List.length(statements)))
 
+/// editPost: 触った項目だけ SET に出て、$n は :id の続き番号。何も触っていなければ文は DB に出ず 0。
+///
+///   { title = Some("t"), body = None, published = Some(true) } → SET updated_at = now(), title = $2, published = $3
+///   全部 None → 文 0 本、戻りは 0
+@Test
+def testEditPostSendsOnlyTouchedColumns(): Unit \ Assert =
+    let touched = { title = Some("t"), body = None, published = Some(true) };
+    let untouched = { title = None, body = None, published = None };
+    let (affected, statements) = DbTest.runRecording(Nil, 1, () -> DbError.runWithFailure(() -> Blog.editPost(5i64, touched)));
+    let (skipped, none) = DbTest.runRecording(Nil, 1, () -> DbError.runWithFailure(() -> Blog.editPost(5i64, untouched)));
+    Assert.assertEq(
+        expected = (Ok(1), List#{("UPDATE posts SET updated_at = now(), title = $2, published = $3 WHERE id = $1", List#{SqlValue.Int64(5i64), SqlValue.Str("t"), SqlValue.Bool(true)})}, Ok(0), 0),
+        (affected, List.map(statement -> (statement#sql, statement#params), statements), skipped, List.length(none)))
+
 /// registerUser: RETURNING の行が返れば id。DDL の制約違反は業務エラー（RegisterErr）に翻訳される。
 ///
 ///   users_email_key（unique）→ EmailTaken / users_name_length（check）→ NameTooLong

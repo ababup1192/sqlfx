@@ -20,6 +20,8 @@ mod QueryDef {
         case Pred
         /// ORDER BY。`Order[table]`
         case Order
+        /// UPDATE の SET 句。`Changes[table]`。exec の UPDATE で、対象テーブルにだけ置ける
+        case Changes
     }
 
     ///

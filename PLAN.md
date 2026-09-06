@@ -67,8 +67,8 @@
    - クエリごとに行レコード + デコーダ（forA）+ 型付き関数（`one` → `Option[Row] \ {SqlRead, DbErr}`、`exec` → `Int32 \ SqlWrite`、RETURNING 付きの書き込みは `\ {SqlWrite, DbErr}`）
    - テーブルごとに断片 DSL 用の `Col` 定義と、制約の enum + `onConstraint`（`Tables.flix`）
    - 生成物に `.q` のハッシュ（`sourceHash`）を埋め、テストで現物と照合する
-4. [x] **断片 DSL の最小版**（`Fragment`）: `Col[row, a]` / `Pred[row]` / `Order[row]`、
-   `eq ne lt le gt ge like isNull isNotNull inList both either negate when all` / `asc desc then`
+4. [x] **断片 DSL の最小版**（`Fragment`）: `Col[row, a, n]` / `Pred[row]` / `Order[row]` / `Changes[row]`、
+   `=== =!= << <<= >> >>= like isNull isNotNull inList both either negate when all` / `asc desc thenAsc thenDesc` / `set setNull setIfSome setOrNull increment rawSet`
    - render は (SQL, パラメータ列) を返す再帰。括弧は全付け。`$n` は本文の引数の続き番号
    - `RawSql` エフェクトで生 SQL を標識化（`Fragment.rawPred` と `Sql.*` の文字列入口、`RawSql.runWithAllow`。生成コードは自己許可）
    - `Decoder` が SELECT 句の断片を持ち、`selectClause` で生 SQL の列名を 1 回にする

@@ -32,6 +32,10 @@ mod QResolve {
         case KeyedNotInResult(String, String)
         /// (クエリ名, slot 名, テーブル名) slot のテーブルが FROM に無い
         case SlotTableNotInFrom(String, String, String)
+        /// (クエリ名, slot 名) Changes は exec にだけ置ける
+        case ChangesSlotRequiresExec(String, String)
+        /// (クエリ名, slot 名, テーブル名) Changes のテーブルが UPDATE の対象でない
+        case ChangesSlotNotUpdateTarget(String, String, String)
     }
 
     ///
@@ -73,7 +77,8 @@ mod QResolve {
                 case StatementKind.Write => Ok(Nil)
             };
             _ <- checkKeyed(queryDef, columns);
-            _ <- checkSlots(queryDef, sources)
+            _ <- checkSlots(queryDef, sources);
+            _ <- checkChangesSlots(queryDef, firstWord, sources)
         ) yield { queryDef = queryDef, columns = columns, writes = isWrite(kind) }
 
     ///
@@ -313,5 +318,19 @@ mod QResolve {
             |> List.find(slot -> not List.exists(source -> source#table#name == slot#table, sources))
             |> Option.map(slot -> ResolveError.SlotTableNotInFrom(queryDef#name, slot#name, slot#table))
             |> (missing -> match missing { case Some(e) => Err(e) case None => Ok(()) })
+
+    ///
+    /// Changes は exec の UPDATE で、UPDATE 直後のテーブル（sources の先頭）にだけ置ける。
+    /// FROM のどれかに一致するだけでは `UPDATE posts ... FROM users` に `Changes[users]` が通ってしまう。
+    ///
+    def checkChangesSlots(queryDef: Query, firstWord: String, sources: List[Source]): Result[ResolveError, Unit] =
+        let target = if (firstWord == "UPDATE") List.head(sources) |> Option.map(source -> source#table#name) else None;
+        queryDef#slots
+            |> List.filter(slot -> slot#kind == SlotKind.Changes)
+            |> List.findMap(slot ->
+                if (queryDef#shape != Shape.Exec) Some(ResolveError.ChangesSlotRequiresExec(queryDef#name, slot#name))
+                else if (target != Some(slot#table)) Some(ResolveError.ChangesSlotNotUpdateTarget(queryDef#name, slot#name, slot#table))
+                else None)
+            |> (failure -> match failure { case Some(e) => Err(e) case None => Ok(()) })
 
 }

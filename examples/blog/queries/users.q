@@ -25,6 +25,10 @@ query renameUser(id: Int64, name: String) -> exec {
     UPDATE users SET name = :name WHERE id = :id
 }
 
+query updateUser(id: Int64) -> exec with changes: Changes[users] {
+    UPDATE users SET {changes} WHERE id = :id AND deleted_at IS NULL
+}
+
 query softDeleteUser(id: Int64) -> exec {
     UPDATE users SET deleted_at = now() WHERE id = :id AND deleted_at IS NULL
 }
