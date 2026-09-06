@@ -18,9 +18,9 @@ mod Tx {
         }
 
     ///
-    /// autocommit を切って Tx を始める。
+    /// autocommit を切って Tx を始める。`Pool.withLazyTx` のように Tx の形を自分で組む所から呼ぶ。
     ///
-    def begin(conn: Connection): Unit \ {IO, TransientDbErr, DbErr} =
+    pub def begin(conn: Connection): Unit \ {IO, TransientDbErr, DbErr} =
         try {
             conn.setAutoCommit(false)
         } catch {
@@ -31,7 +31,7 @@ mod Tx {
     /// COMMIT して autocommit に戻す。COMMIT 自体の失敗（直列化失敗など）も翻訳する。
     /// 失敗したら ROLLBACK して autocommit に戻してから投げる。戻さないと、次の文が誰も COMMIT しない Tx に入る。
     ///
-    def commit(conn: Connection): Unit \ {IO, TransientDbErr, DbErr} =
+    pub def commit(conn: Connection): Unit \ {IO, TransientDbErr, DbErr} =
         try {
             conn.commit();
             conn.setAutoCommit(true)
@@ -42,7 +42,7 @@ mod Tx {
     ///
     /// ROLLBACK して autocommit に戻す。ROLLBACK の失敗は握りつぶす（元のエラーをそのまま再送出したいので）。
     ///
-    def rollback(conn: Connection): Unit \ IO =
+    pub def rollback(conn: Connection): Unit \ IO =
         try {
             conn.rollback();
             conn.setAutoCommit(true)

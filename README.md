@@ -463,6 +463,9 @@ Retry.withRetry(3, () ->                            // Transient なら thunk �
                 Blog.removeUser(1i64)))))
 ```
 
+`Pool.withLazyTx(pool, thunk)` は「最初の SQL が来た時に借りて BEGIN、終わったら COMMIT / ROLLBACK」。SQL を出さない thunk はプールに触らない。
+GraphQL のリゾルバのように、DB を使うかどうかが呼ぶまで分からない単位を 1 つの Tx にしたい所で使う。
+
 `Pool` は HikariCP を包んだ物。接続数の上限を超えた借り出しは `borrowTimeoutMs` 待って `TransientDbErr.timeout` になる。
 CLI やテストのように 1 回だけ開くなら `Jdbc.withConnection(config, conn -> ...)`（毎回接続する）。
 `withRetry` を `withConnection` の外に置くのは、`connectionLost` した接続で再試行しても無駄だから。

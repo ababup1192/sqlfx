@@ -91,4 +91,46 @@ mod Pool {
             case Err(kind) => DbError.raise(kind)
         }
 
+    ///
+    /// 最初の SQL が来た時に初めて接続を借りて BEGIN し、thunk が終わったら COMMIT（失敗なら ROLLBACK）して返す。
+    /// SQL を 1 本も出さない thunk はプールに触らない。GraphQL のリゾルバのように「DB を使うかもしれない」単位を
+    /// 1 つの Tx にしたい所で使う。ネストは `withTx` と同じく未対応。
+    ///
+    /// WhyNot: Ref を region に閉じるのは、ハンドラのクロージャの中で借りた接続を持ち回る必要があり、
+    /// 継続をまたいで値を持てる物が Flix では region の Ref だけのため。
+    ///
+    pub def withLazyTx(pool: Pool, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        region rc {
+            let slot = Ref.fresh(rc, None);
+            def conn() = match Ref.get(slot) {
+                case Some(open) => open
+                case None       => {
+                    let open = borrow(pool);
+                    Tx.begin(open);
+                    Ref.put(Some(open), slot);
+                    open
+                }
+            };
+            let outcome = DbError.runWithKind(() ->
+                run thunk() with handler SqlRead {
+                    def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn(), sql, params)))
+                } with handler SqlWrite {
+                    def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(conn(), sql, params)))
+                    def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn(), sql, params)))
+                });
+            let finished = match (Ref.get(slot), outcome) {
+                case (None, _)            => outcome
+                case (Some(open), Ok(_))  => {
+                    let committed = DbError.runWithKind(() -> Tx.commit(open));
+                    Jdbc.close(open);
+                    Result.flatMap(_ -> outcome, committed)
+                }
+                case (Some(open), Err(_)) => { Tx.rollback(open); Jdbc.close(open); outcome }
+            };
+            match finished {
+                case Ok(value) => value
+                case Err(kind) => DbError.raise(kind)
+            }
+        }
+
 }
