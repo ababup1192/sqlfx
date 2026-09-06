@@ -113,3 +113,31 @@ def testDescribeError(): Unit \ Assert =
     Assert.assertEq(
         expected = "column 'name' is Str, expected Int64",
         Decoder.describeError(DecodeError.TypeMismatch("name", "Int64", "Str")))
+
+// ---- SELECT 句 ----
+
+/// forA に並べた順で SELECT 句の断片が並び、pure |> ap で組んでも同じ。opt は列を変えない。
+@Test
+def testSelectListFollowsForAOrder(): Unit \ Assert =
+    let viaForA = forA (
+        id <- Decoder.int64("id");
+        name <- Decoder.str("name");
+        email <- Decoder.opt(Decoder.str("email"))
+    ) yield (id, name, email);
+    let viaAp = Decoder.pure(id -> name -> email -> (id, name, email))
+        |> Decoder.ap(Decoder.int64("id"))
+        |> Decoder.ap(Decoder.str("name"))
+        |> Decoder.ap(Decoder.opt(Decoder.str("email")));
+    Assert.assertEq(
+        expected = (List#{"id", "name", "email"}, "id, name, email"),
+        (Decoder.selectList(viaForA), Decoder.selectClause(viaAp)))
+
+/// selectExpr は式を `expr AS label` として SELECT 句に出し、読むのはラベルの列。同じ列を 2 回読んでも SELECT 句には 1 回。
+@Test
+def testSelectExprAndDedupe(): Unit \ Assert =
+    let count = Decoder.selectExpr("count(*)::bigint", Decoder.int64("total"));
+    let twice = forA (a <- Decoder.int64("id"); b <- Decoder.int64("id")) yield a + b;
+    let row = Row.makeRows(List#{"total"}, List#{List#{SqlValue.Int64(3i64)}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    Assert.assertEq(
+        expected = (List#{"count(*)::bigint AS total"}, Ok(3i64), List#{"id"}),
+        (Decoder.selectList(count), Decoder.decodeRow(count, row), Decoder.selectList(twice)))

@@ -19,7 +19,7 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "1"
+    pub def version(): String = "3"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
@@ -164,13 +164,15 @@ mod Codegen {
             |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> "${SqlType.sqlValueCase(param#paramType)}(${paramRef(param#name)})") |> Option.getWithDefault(""))
             |> (values -> if (List.isEmpty(values)) "Nil" else "List#{${List.join(", ", values)}}");
         let decoder = "${queryDef#name}Decoder()";
-        let (resultType, effects, call) = match (queryDef#shape, resolved#writes) {
+        let (resultType, effects, statement) = match (queryDef#shape, resolved#writes) {
             case (Shape.One, false) => ("Option[${rowTypeName(queryDef)}]", "DbRead", "Sql.fetchOneAs(${decoder}, sql, params)")
             case (Shape.Many, false) => ("List[${rowTypeName(queryDef)}]", "DbRead", "Sql.fetchAs(${decoder}, sql, params)")
             case (Shape.One, true) => ("Option[${rowTypeName(queryDef)}]", "DbWrite", "Sql.executeReturningOneAs(${decoder}, sql, params)")
             case (Shape.Many, true) => ("List[${rowTypeName(queryDef)}]", "DbWrite", "Sql.executeReturningAs(${decoder}, sql, params)")
             case (Shape.Exec, _) => ("Int32", "DbWrite", "Sql.execute(sql, params)")
         };
+        // 生成器が検査した SQL なので、生成関数の中で RawSql を許可する。slot に入る Fragment.rawPred は呼び出し側で許可するので、ここでは覆われない
+        let call = "RawSql.runWithAllow(() -> ${statement})";
         let doc = List.join("\n", List#{
             "    ///",
             "    /// ${queryDef#name}: ${oneLine(sqlTemplate)}",
@@ -252,14 +254,20 @@ mod Codegen {
         })
 
     ///
-    /// `mod UsersTable { pub enum UsersTable { case UsersTable }  pub def id(): Col[UsersTable, Int64] = ... }`
+    /// DDL の NOT NULL を `Col` の第 3 型パラメータに写す。
+    ///
+    def nullabilityMarker(nullable: Bool): String =
+        if (nullable) "Fragment.Nullable" else "Fragment.NotNull"
+
+    ///
+    /// `mod UsersTable { pub enum UsersTable { case UsersTable }  pub def id(): Col[UsersTable, Int64, NotNull] = ... }`
     /// 型が分からない列は出さない。
     ///
     def renderTable(table: Table): String =
         let moduleName = tableModuleOf(table#name);
         let cols = table#columns
             |> List.filterMap(column -> column#columnType |> Option.map(sqlType ->
-                "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}] = Fragment.Col.Col(\"${column#name}\", ${SqlType.sqlValueCase(sqlType)})"));
+                "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}, ${nullabilityMarker(column#nullable)}] = Fragment.Col.Col(\"${column#name}\", ${SqlType.sqlValueCase(sqlType)})"));
         List.join("\n", List#{
             "///",
             "/// ${table#name} テーブル。enum は断片 DSL の型に付ける印、関数は列。",

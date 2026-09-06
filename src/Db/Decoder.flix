@@ -1,16 +1,24 @@
 mod Decoder {
 
     ///
-    /// 1 行を型付きの値に変える純粋関数。列名 → 添字の解決は行の `columns` で行う。
+    /// 1 行を型付きの値に変える純粋関数と、その値を読むのに要る SELECT 句の断片の一覧（逆順で持つ）。
+    /// 列名 → 添字の解決は行の `columns` で行う。断片の一覧は `selectClause` で SELECT 句を組むのに使う。
     ///
-    pub enum Decoder[a](Row.Row -> Result[DecodeError, a])
+    /// WhyNot: 断片を逆順で持つのは、`ap` で連結するときに長い側（function）をコピーしないため。
+    ///
+    pub enum Decoder[a] {
+        case Decoder(List[String], Row.Row -> Result[DecodeError, a])
+    }
 
     ///
-    /// forA / forM で列を並べて組めるようにする。`Decoder.pure` / `ap` / `flatMap` の別名。
+    /// forA で列を並べて組めるようにする。`Decoder.pure` / `ap` の別名。Monad にはしない（後述）。
     ///
     /// WhyNot: trait の `f` は `\ ef` を許すが、デコーダは行を受け取ってから純粋に走るので、
     /// `f` の効果を構築時に起こすことはできない。ここでは `f` を純粋と見なして受ける（`unchecked_cast`）。
     /// forA の yield に効果のある式を書かないこと。書けば型は通るが、効果はデコード時に手続き的に起きる。
+    ///
+    /// WhyNot: `Monad`（`flatMap`）を付けないのは、次に読む列が値で決まると SELECT 句を静的に組めなくなるから。
+    /// 値で分岐したいときは `column` で SqlValue を取り、`map` の中で分岐する。
     ///
     instance Functor[Decoder] {
         pub def map(f: a -> b \ ef, decoder: Decoder[a]): Decoder[b] \ ef =
@@ -21,11 +29,6 @@ mod Decoder {
         pub def point(value: a): Decoder[a] = Decoder.pure(value)
         pub def ap(function: Decoder[a -> b \ ef], argument: Decoder[a]): Decoder[b] \ ef =
             checked_ecast(Decoder.ap(argument, unchecked_cast(function as Decoder[a -> b])))
-    }
-
-    instance Monad[Decoder] {
-        pub def flatMap(f: a -> Decoder[b] \ ef, decoder: Decoder[a]): Decoder[b] \ ef =
-            checked_ecast(Decoder.flatMap(unchecked_cast(f as a -> Decoder[b]), decoder))
     }
 
     ///
@@ -62,7 +65,7 @@ mod Decoder {
     /// 行を渡してデコードを走らせる。
     ///
     pub def decodeRow(decoder: Decoder[a], row: Row.Row): Result[DecodeError, a] =
-        let Decoder.Decoder(decode) = decoder;
+        let Decoder.Decoder(_, decode) = decoder;
         decode(row)
 
     ///
@@ -71,44 +74,70 @@ mod Decoder {
     pub def decodeRows(decoder: Decoder[a], rows: List[Row.Row]): Result[DecodeError, List[a]] =
         Result.traverse(decodeRow(decoder), rows)
 
-    ///
-    /// 行を見ずに値を返す。`ap` でレコードを組み立てる起点。
-    ///
-    pub def pure(value: a): Decoder[a] = Decoder.Decoder(_ -> Ok(value))
+    // ---- SELECT 句 ----
 
     ///
-    /// デコード結果に関数を当てる。
+    /// このデコーダが読む SELECT 句の断片を、`forA` に並べた順で。同じ断片は 1 つにまとめる。
+    ///
+    pub def selectList(decoder: Decoder[a]): List[String] =
+        let Decoder.Decoder(reversed, _) = decoder;
+        List.reverse(reversed) |> List.distinct
+
+    ///
+    /// SELECT 句の中身（`id, name, email`）。生 SQL に `"SELECT ${Decoder.selectClause(d)} FROM ..."` と埋める。
+    /// 列名を書くのがデコーダの 1 回だけになり、SELECT 句とデコーダのズレが起きない。
+    ///
+    pub def selectClause(decoder: Decoder[a]): String =
+        selectList(decoder) |> List.join(", ")
+
+    ///
+    /// 式の列。内側のデコーダが読む列名をラベルにして `expr AS label` を SELECT 句に出す。
+    /// `selectExpr("count(*)::bigint", Decoder.int64("total"))` は `count(*)::bigint AS total` を出し、`total` を Int64 で読む。
+    /// JOIN の `selectExpr("u.name", Decoder.str("author_name"))` も同じ形。
+    ///
+    pub def selectExpr(expr: String, decoder: Decoder[a]): Decoder[a] =
+        let Decoder.Decoder(reversed, decode) = decoder;
+        Decoder.Decoder(List.map(label -> "${expr} AS ${label}", reversed), decode)
+
+    // ---- 組み立て ----
+
+    ///
+    /// 行を見ずに値を返す。`ap` でレコードを組み立てる起点。列は読まない。
+    ///
+    pub def pure(value: a): Decoder[a] = Decoder.Decoder(Nil, _ -> Ok(value))
+
+    ///
+    /// デコード結果に関数を当てる。列はそのまま。
     ///
     pub def map(f: a -> b, decoder: Decoder[a]): Decoder[b] =
-        Decoder.Decoder(row -> decodeRow(decoder, row) |> Result.map(f))
+        let Decoder.Decoder(reversed, decode) = decoder;
+        Decoder.Decoder(reversed, row -> decode(row) |> Result.map(f))
 
     ///
     /// 関数を返すデコーダに引数のデコーダを当てる。複数列を 1 つのレコードへ組むときに `pure` から続けて使う。
+    /// 列は function の分が先、argument の分が後（forA に並べた順）。
     ///
     pub def ap(argument: Decoder[a], function: Decoder[a -> b]): Decoder[b] =
-        Decoder.Decoder(row ->
-            decodeRow(function, row) |> Result.flatMap(f -> decodeRow(argument, row) |> Result.map(f)))
-
-    ///
-    /// デコード結果から次のデコーダを決める。
-    ///
-    pub def flatMap(f: a -> Decoder[b], decoder: Decoder[a]): Decoder[b] =
-        Decoder.Decoder(row -> decodeRow(decoder, row) |> Result.flatMap(value -> decodeRow(f(value), row)))
+        let Decoder.Decoder(argumentReversed, decodeArgument) = argument;
+        let Decoder.Decoder(functionReversed, decodeFunction) = function;
+        Decoder.Decoder(List.append(argumentReversed, functionReversed), row ->
+            decodeFunction(row) |> Result.flatMap(f -> decodeArgument(row) |> Result.map(f)))
 
     ///
     /// 列を SqlValue のまま取り出す。列が無ければ MissingColumn。
     ///
     pub def column(name: String): Decoder[SqlValue.SqlValue] =
-        Decoder.Decoder(row -> Row.get(name, row) |> Option.toOk(DecodeError.MissingColumn(name)))
+        Decoder.Decoder(List#{name}, row -> Row.get(name, row) |> Option.toOk(DecodeError.MissingColumn(name)))
 
     ///
-    /// NULL を許す列。内側のデコーダが UnexpectedNull で失敗したら None、成功したら Some。
+    /// NULL を許す列。内側のデコーダが UnexpectedNull で失敗したら None、成功したら Some。列はそのまま。
     ///
-    /// WhyNot: Decoder に「見ている列名」を持たせて先に NULL 判定しないのは、`ap` で複数列を束ねた後の
-    /// NULL 判定は定義できず、`opt` は列 1 つに対してだけ意味を持つから。UnexpectedNull を None に読み替えれば足りる。
+    /// WhyNot: 列名を見て先に NULL 判定しないのは、`ap` で複数列を束ねた後の NULL 判定は定義できず、
+    /// `opt` は列 1 つに対してだけ意味を持つから。UnexpectedNull を None に読み替えれば足りる。
     ///
     pub def opt(decoder: Decoder[a]): Decoder[Option[a]] =
-        Decoder.Decoder(row -> match decodeRow(decoder, row) {
+        let Decoder.Decoder(reversed, decode) = decoder;
+        Decoder.Decoder(reversed, row -> match decode(row) {
             case Err(DecodeError.UnexpectedNull(_)) => Ok(None)
             case Err(error) => Err(error)
             case Ok(value) => Ok(Some(value))
@@ -120,7 +149,7 @@ mod Decoder {
     pub def typed(column: { name = String, expected = String }, extract: SqlValue.SqlValue -> Option[a]): Decoder[a] =
         let name = column#name;
         let expected = column#expected;
-        Decoder.Decoder(row -> Row.get(name, row) |> Option.toOk(DecodeError.MissingColumn(name)) |> Result.flatMap(value ->
+        Decoder.Decoder(List#{name}, row -> Row.get(name, row) |> Option.toOk(DecodeError.MissingColumn(name)) |> Result.flatMap(value ->
             if (SqlValue.isNull(value))
                 Err(DecodeError.UnexpectedNull(name))
             else

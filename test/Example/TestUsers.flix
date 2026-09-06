@@ -19,8 +19,8 @@ def exampleUserRows(): List[Row] =
 /// findUser は先頭行を User に組む。email の NULL は None。0 行なら None。
 @Test
 def testFindUser(): Unit \ Assert =
-    let found = DbError.runWithFailure(() -> DbTest.runWithRows(exampleUserRows(), () -> ExampleUsers.findUser(1i64)));
-    let missing = DbError.runWithFailure(() -> DbTest.runWithRows(Nil, () -> ExampleUsers.findUser(9i64)));
+    let found = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> DbTest.runWithRows(exampleUserRows(), () -> ExampleUsers.findUser(1i64))));
+    let missing = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> DbTest.runWithRows(Nil, () -> ExampleUsers.findUser(9i64))));
     Assert.assertEq(
         expected = (Ok(Some((1i64, "alice", Some("a@example.com")))), Ok(None)),
         (
@@ -31,7 +31,7 @@ def testFindUser(): Unit \ Assert =
 /// listUsers は全行を組む。
 @Test
 def testListUsers(): Unit \ Assert =
-    let result = DbError.runWithFailure(() -> DbTest.runWithRows(exampleUserRows(), () -> ExampleUsers.listUsers()));
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> DbTest.runWithRows(exampleUserRows(), () -> ExampleUsers.listUsers())));
     Assert.assertEq(
         expected = Ok(List#{(1i64, Some("a@example.com")), (2i64, None)}),
         result |> Result.map(List.map(user -> (user#id, user#email))))
@@ -39,13 +39,13 @@ def testListUsers(): Unit \ Assert =
 /// renameUser は影響行数で true / false。
 @Test
 def testRenameUser(): Unit \ Assert =
-    let (updated, _) = DbTest.runRecording(Nil, 1, () -> DbError.runWithFailure(() -> ExampleUsers.renameUser(1i64, "alice2")));
-    let (missing, _) = DbTest.runRecording(Nil, 0, () -> DbError.runWithFailure(() -> ExampleUsers.renameUser(9i64, "x")));
+    let (updated, _) = DbTest.runRecording(Nil, 1, () -> RawSql.runWithAllow(() -> DbError.runWithFailure(() -> ExampleUsers.renameUser(1i64, "alice2"))));
+    let (missing, _) = DbTest.runRecording(Nil, 0, () -> RawSql.runWithAllow(() -> DbError.runWithFailure(() -> ExampleUsers.renameUser(9i64, "x"))));
     Assert.assertEq(expected = (Ok(true), Ok(false)), (updated, missing))
 
 /// listUsers は何人いてもクエリ 1 本（N+1 が無い）。
 @Test
 def testListUsersIsOneQuery(): Unit \ Assert =
     let (_, statements) = DbTest.runRecording(exampleUserRows(), 0, () ->
-        DbError.runWithFailure(() -> ExampleUsers.listUsers()));
+        RawSql.runWithAllow(() -> DbError.runWithFailure(() -> ExampleUsers.listUsers())));
     Assert.assertEq(expected = 1, List.length(statements))

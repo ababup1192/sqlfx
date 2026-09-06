@@ -70,7 +70,8 @@
 4. [x] **断片 DSL の最小版**（`Fragment`）: `Col[row, a]` / `Pred[row]` / `Order[row]`、
    `eq ne lt le gt ge like isNull isNotNull inList both either negate when all` / `asc desc then`
    - render は (SQL, パラメータ列) を返す再帰。括弧は全付け。`$n` は本文の引数の続き番号
-   - `RawSql` エフェクトで生 SQL を標識化（`Fragment.rawPred`、`RawSql.runWithAllow`）
+   - `RawSql` エフェクトで生 SQL を標識化（`Fragment.rawPred` と `Sql.*` の文字列入口、`RawSql.runWithAllow`。生成コードは自己許可）
+   - `Decoder` が SELECT 句の断片を持ち、`selectClause` で生 SQL の列名を 1 回にする
 5. [ ] **CI 検証**: 実 PG に全 `.q` を `PREPARE`（実行なし）
 6. [x] デモプロジェクト `examples/blog/`（flix.toml 付きの独立プロジェクト。migrations + .q + 生成物 + ユースケース、
    生成コード版と生 SQL 版の 2 系統で DB 無し / 実 PG のテスト。本体は `make vendor` で src/sqlfx/ に写す）

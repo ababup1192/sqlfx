@@ -1,3 +1,4 @@
+use Fragment.{===, >>=}
 use DbError.DbFailure
 
 // 生成した各クエリを、決まったテストデータ（BlogTestSupport.seed）に対して実行し、返る行を丸ごと期待値と比べる。
@@ -49,7 +50,7 @@ def testSearchUsersAll(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
 def testSearchUsersFiltered(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let result = BlogTestSupport.withSeed(() -> {
         let members = UsersQueries.searchUsers(10i64,
-            Fragment.both(Fragment.eq(UsersTable.role(), "member"), Fragment.isNotNull(UsersTable.email())),
+            Fragment.both(UsersTable.role() === Fragment.value("member"), Fragment.isNotNull(UsersTable.email())),
             Fragment.asc(UsersTable.id())) |> List.map(row -> row#name);
         let firstTwo = UsersQueries.searchUsers(2i64, Fragment.always(), Fragment.asc(UsersTable.id())) |> List.map(row -> row#name);
         let byIds = UsersQueries.searchUsers(10i64, Fragment.inList(UsersTable.id(), List#{3i64, 1i64}), Fragment.asc(UsersTable.id())) |> List.map(row -> row#name);
@@ -90,7 +91,7 @@ def testPostsByUsers(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
 def testPublishedPosts(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let result = BlogTestSupport.withSeed(() -> (
         PostsQueries.publishedPosts(10i64, Fragment.always()) |> List.map(row -> row#title),
-        PostsQueries.publishedPosts(10i64, Fragment.ge(PostsTable.views(), 1)) |> List.map(row -> row#title),
+        PostsQueries.publishedPosts(10i64, PostsTable.views() >>= Fragment.value(1)) |> List.map(row -> row#title),
         PostsQueries.publishedPosts(1i64, Fragment.always()) |> List.map(row -> row#title)
     ));
     Assert.assertEq(expected = Ok((List#{"Hello", "Second"}, List#{"Hello"}, List#{"Hello"})), result)

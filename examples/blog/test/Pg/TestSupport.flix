@@ -27,7 +27,7 @@ mod BlogTestSupport {
     ///
     /// migrations/ を読んで、テーブルを作り直す。
     ///
-    pub def resetSchema(): Unit \ DbWrite + Fs.FileRead.FileRead =
+    pub def resetSchema(): Unit \ DbWrite + RawSql + Fs.FileRead.FileRead =
         let _ = Sql.execute("DROP TABLE IF EXISTS posts, users CASCADE", Nil);
         run {
             List#{"001_users.sql", "002_posts.sql", "003_posts_views.sql"}
@@ -42,17 +42,17 @@ mod BlogTestSupport {
     /// テーブルを作り直し、接続を開いて body を走らせ、必ず閉じる。失敗は DbFailure に落とす。
     /// テストは全部同じ users / posts を作り直すので、直列に走る前提。
     ///
-    pub def withDb(body: Unit -> a \ Db + IO): Result[DbFailure, a] \ {IO, Fs.FileRead.FileRead} =
+    pub def withDb(body: Unit -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + {IO, Fs.FileRead.FileRead} =
         withConn(_ -> body())
 
     ///
     /// withDb と同じだが、Tx を張りたいテスト向けに接続も渡す。
     ///
-    pub def withConn(body: Connection -> a \ Db + IO): Result[DbFailure, a] \ {IO, Fs.FileRead.FileRead} =
-        DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), conn -> {
+    pub def withConn(body: Connection -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + {IO, Fs.FileRead.FileRead} =
+        DbError.runWithFailure(() -> RawSql.runWithAllow(() -> Jdbc.withConnection(pgConfig(), conn -> {
             resetSchema();
             body(conn)
-        }))
+        })))
 
     ///
     /// 決まった形のテストデータ。id は BIGSERIAL なので入れた順に 1 から振られる（テーブルは毎回作り直す）。
@@ -63,7 +63,7 @@ mod BlogTestSupport {
     ///   3 carol  NULL               member     3 bob   "Draft"    draft     views 0  tags {wip}
     ///   4 dave   dave@example.com   member（退会済み）
     ///
-    pub def seed(): Unit \ Db =
+    pub def seed(): Unit \ Db + RawSql =
         discard UsersQueries.insertUser({ name = "alice", email = "alice@example.com", role = "admin" });
         discard UsersQueries.insertUser({ name = "bob", email = "bob@example.com", role = "member" });
         discard Sql.execute("INSERT INTO users (name, email, role) VALUES ('carol', NULL, 'member')", Nil);
@@ -79,7 +79,7 @@ mod BlogTestSupport {
     ///
     /// テーブルを作り直し、seed を入れてから body を走らせる。
     ///
-    pub def withSeed(body: Unit -> a \ Db + IO): Result[DbFailure, a] \ {IO, Fs.FileRead.FileRead} =
+    pub def withSeed(body: Unit -> a \ ef): Result[DbFailure, a] \ (ef - {SqlRead, SqlWrite, TransientDbErr, DbErr, RawSql}) + {IO, Fs.FileRead.FileRead} =
         withDb(() -> { seed(); body() })
 
     ///

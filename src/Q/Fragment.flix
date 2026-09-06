@@ -2,26 +2,51 @@
 /// 断片 DSL（design.md §5）。`.q` の `{slot}` に入れる述語と並び順を、型付きの値として組む。
 /// 値は必ずプレースホルダになり、識別子は Col を通した物しか出ないので、SQL インジェクションが構造的に起きない。
 ///
-///
-/// 生 SQL を断片に入れるエスケープハッチの標識。使う箇所が型から列挙できる。
-///
-pub eff RawSql {
-    def allow(sql: String): Unit
-}
-
 mod Fragment {
 
-    // 利用者が呼ぶのは組み立ての関数（eq ... all / asc desc then）。render 系は生成コードが呼ぶ。
+    // 利用者が呼ぶのは組み立ての関数と演算子（=== ... all / asc desc then）。render 系は生成コードが呼ぶ。
     // and / or / not は Flix の予約語なので both / either / negate と名付けている。
 
     use SqlValue.SqlValue
 
     ///
-    /// テーブル `row` の型 `a` の列。生成器が吐く。第 2 引数は値を SqlValue に包む関数。
+    /// 列が NULL を取らない印。`Col` の第 3 型パラメータに入る。
     ///
-    pub enum Col[_row: Type, a: Type] {
-        case Col(String, a -> SqlValue)
+    pub enum NotNull {
+        case NotNull
     }
+
+    ///
+    /// 列が NULL を取りうる印。`isNull` / `isNotNull` はこの印の列にだけ書ける。
+    ///
+    pub enum Nullable {
+        case Nullable
+    }
+
+    ///
+    /// 比較の右辺に置いた値の印。`value(x)` が付ける。`isNull` や `asc` には置けない。
+    ///
+    pub enum Literal {
+        case Literal
+    }
+
+    ///
+    /// 比較の項。テーブル `row` の型 `a` の列か、同じ型の値。
+    /// `n` は列なら NotNull か Nullable（生成器が DDL から写す）、値なら Literal。
+    /// `Col` の第 2 引数は値を SqlValue に包む関数。値の項はこの関数を持たないので、比較の左辺は必ず列。
+    ///
+    pub enum Col[_row: Type, a: Type, _n: Type] {
+        case Col(String, a -> SqlValue)
+        case Value(a)
+    }
+
+    ///
+    /// `n` が列の印（NotNull / Nullable）である証拠。比較の左辺、isNull、asc / desc はこれを要求する。
+    ///
+    pub trait IsColumn[n: Type]
+
+    instance IsColumn[NotNull]
+    instance IsColumn[Nullable]
 
     ///
     /// 比較演算子。文字列で持たないのは、`render` が出す物を閉じた集合にするため。
@@ -44,6 +69,8 @@ mod Fragment {
         case Always
         /// `col op $n`
         case Compare(String, CompareOp, SqlValue)
+        /// `col op col`。値を積まないので $n は進まない
+        case CompareCols(String, CompareOp, String)
         case IsNull(String)
         case IsNotNull(String)
         /// `col IN ($n, ...)`。空なら FALSE
@@ -69,20 +96,51 @@ mod Fragment {
     // ---- 組み立て ----
     // WhyNot: and / or / not を関数名にしないのは Flix の予約語だから。both / either / negate で代える。
 
-    def colName(col: Col[row, a]): String = match col { case Col.Col(name, _) => name }
+    ///
+    /// 列の名前と、値を SqlValue に包む関数。IsColumn が付く所でしか呼ばないので Value には来ない。
+    ///
+    def column(col: Col[row, a, n]): (String, a -> SqlValue) with IsColumn[n] = match col {
+        case Col.Col(name, toSql) => (name, toSql)
+        case Col.Value(_) => bug!("Fragment: IsColumn の付いた項が値だった")
+    }
 
-    def encode(col: Col[row, a], value: a): SqlValue = match col { case Col.Col(_, toSql) => toSql(value) }
+    def colName(col: Col[row, a, n]): String with IsColumn[n] = fst(column(col))
 
-    pub def eq(col: Col[row, a], value: a): Pred[row] = Pred.Compare(colName(col), CompareOp.Eq, encode(col, value))
-    pub def ne(col: Col[row, a], value: a): Pred[row] = Pred.Compare(colName(col), CompareOp.Ne, encode(col, value))
-    pub def lt(col: Col[row, a], value: a): Pred[row] = Pred.Compare(colName(col), CompareOp.Lt, encode(col, value))
-    pub def le(col: Col[row, a], value: a): Pred[row] = Pred.Compare(colName(col), CompareOp.Le, encode(col, value))
-    pub def gt(col: Col[row, a], value: a): Pred[row] = Pred.Compare(colName(col), CompareOp.Gt, encode(col, value))
-    pub def ge(col: Col[row, a], value: a): Pred[row] = Pred.Compare(colName(col), CompareOp.Ge, encode(col, value))
-    pub def like(col: Col[row, String], pattern: String): Pred[row] = Pred.Compare(colName(col), CompareOp.Like, SqlValue.Str(pattern))
-    pub def isNull(col: Col[row, a]): Pred[row] = Pred.IsNull(colName(col))
-    pub def isNotNull(col: Col[row, a]): Pred[row] = Pred.IsNotNull(colName(col))
-    pub def inList(col: Col[row, a], values: List[a]): Pred[row] = Pred.In(colName(col), List.map(encode(col), values))
+    ///
+    /// 比較の右辺に置く値。`UsersTable.id() === Fragment.value(3i64)`。SqlValue への変換は左辺の列が持つ。
+    ///
+    pub def value(x: a): Col[row, a, Literal] = Col.Value(x)
+
+    // ---- 比較 ----
+    // 左辺は列、右辺は列か値。型 a と row が一致しないと型エラー。nullability は一致しなくてよい。
+    // WhyNot: > < >= <= == != を使わないのは、Flix でこれらが組み込みの比較に固定されていて定義し直せないから。
+    // = と <> は Slick と同じ === / =!=、順序は文字を重ねる。`use Fragment.{>>}` を書いたスコープだけ Prelude の関数合成に勝つ。
+
+    def compare(op: CompareOp, left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] =
+        let (leftName, toSql) = column(left);
+        match right {
+            case Col.Col(rightName, _) => Pred.CompareCols(leftName, op, rightName)
+            case Col.Value(x) => Pred.Compare(leftName, op, toSql(x))
+        }
+
+    pub def ===(left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] = compare(CompareOp.Eq, left, right)
+    pub def =!=(left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] = compare(CompareOp.Ne, left, right)
+    pub def <<(left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] = compare(CompareOp.Lt, left, right)
+    pub def <<=(left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] = compare(CompareOp.Le, left, right)
+    pub def >>(left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] = compare(CompareOp.Gt, left, right)
+    pub def >>=(left: Col[row, a, n1], right: Col[row, a, n2]): Pred[row] with IsColumn[n1] = compare(CompareOp.Ge, left, right)
+
+    pub def like(col: Col[row, String, n], pattern: String): Pred[row] with IsColumn[n] = Pred.Compare(colName(col), CompareOp.Like, SqlValue.Str(pattern))
+
+    pub def inList(col: Col[row, a, n], values: List[a]): Pred[row] with IsColumn[n] =
+        let (name, toSql) = column(col);
+        Pred.In(name, List.map(toSql, values))
+
+    ///
+    /// `IS NULL`。Nullable の列にだけ書ける。NOT NULL の列や値には型エラーになる。
+    ///
+    pub def isNull(col: Col[row, a, Nullable]): Pred[row] = Pred.IsNull(colName(col))
+    pub def isNotNull(col: Col[row, a, Nullable]): Pred[row] = Pred.IsNotNull(colName(col))
     ///
     /// 絞り込み無し（TRUE）。
     ///
@@ -128,8 +186,8 @@ mod Fragment {
         RawSql.allow(sql);
         Pred.Raw(sql)
 
-    pub def asc(col: Col[row, a]): Order[row] = Order.Asc(colName(col))
-    pub def desc(col: Col[row, a]): Order[row] = Order.Desc(colName(col))
+    pub def asc(col: Col[row, a, n]): Order[row] with IsColumn[n] = Order.Asc(colName(col))
+    pub def desc(col: Col[row, a, n]): Order[row] with IsColumn[n] = Order.Desc(colName(col))
     pub def then(first: Order[row], second: Order[row]): Order[row] = Order.Then(first, second)
 
     // ---- render ----
@@ -149,6 +207,7 @@ mod Fragment {
         match pred {
             case Pred.Always => ("TRUE", params, next)
             case Pred.Compare(col, op, value) => ("(${col} ${opSql(op)} $${next})", value :: params, next + 1)
+            case Pred.CompareCols(left, op, right) => ("(${left} ${opSql(op)} ${right})", params, next)
             case Pred.IsNull(col) => ("(${col} IS NULL)", params, next)
             case Pred.IsNotNull(col) => ("(${col} IS NOT NULL)", params, next)
             case Pred.In(_, Nil) => ("FALSE", params, next)
@@ -201,19 +260,5 @@ mod Fragment {
         case Order.Desc(col) => List#{"${col} DESC"}
         case Order.Then(first, second) => List.append(orderTerms(first), orderTerms(second))
     }
-
-}
-
-mod RawSql {
-
-    ///
-    /// 生 SQL を全部許す。監査した上で main などの境界で被せる。
-    ///
-    pub def runWithAllow(thunk: Unit -> a \ ef): a \ ef - RawSql =
-        run {
-            thunk()
-        } with handler RawSql {
-            def allow(_sql, resume) = resume(())
-        }
 
 }

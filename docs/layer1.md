@@ -11,7 +11,7 @@ Schema      机上のスキーマ（テーブル名 → 列の名前・型・NUL
 DdlParser   migrations の DDL → Schema。読めない文は警告
 SqlTokens   SQL の字句（QResolve が使う）
 QResolve    SELECT の FROM / JOIN / リストを Schema に当てて結果の列を決める
-Fragment    断片 DSL（Col / Pred / Order と render）、RawSql エフェクト
+Fragment    断片 DSL（Col / Pred / Order と render）。RawSql エフェクトは層0（src/Db/RawSql.flix）
 Codegen     Resolved → Flix ソース
 src/Main.flix  `bin/flix run -- gen <migrations> <queries> <out>`
 ```
@@ -71,10 +71,13 @@ Fragment.both(Fragment.isNull(UsersTable.deletedAt()),
 Fragment.then(Fragment.asc(UsersTable.name()), Fragment.desc(UsersTable.id()))
 ```
 
-- 述語: `eq ne lt le gt ge like isNull isNotNull inList both either negate when all any always`。`always()` は TRUE で `both` はそれを消す、`inList` の空は FALSE
+- 項は `Col[row, a, n]`。列なら `n` は `NotNull` か `Nullable`（生成器が DDL から写す）、`Fragment.value(x)` なら `Literal`
+- 比較は `=== =!= << <<= >> >>=`（`use Fragment.{>>}` が要る）。左辺は列（trait `IsColumn[n]`）、右辺は列か値。`a` と `row` が一致しないと型エラー、nullability は問わない。右が値なら `$n`、列なら列名をそのまま出す
+- `like inList` は関数。`isNull isNotNull` は `Col[row, a, Nullable]` にだけ書ける
+- 繋ぎ: `both either negate when all any always`。`always()` は TRUE で `both` はそれを消す、`inList` の空は FALSE
 - 並び順: `asc desc then unordered`、`unordered()` は ORDER BY を出さない
 - render は括弧全付け。値は必ず `$n` になり、識別子は `Col` からしか来ない
-- 生 SQL は `Fragment.rawPred(sql)` で、呼ぶ側に `RawSql` が付く。境界で `RawSql.runWithAllow`
+- 生 SQL は `Fragment.rawPred(sql)` で、呼ぶ側に `RawSql` が付く。境界で `RawSql.runWithAllow`。生成関数は自分の SQL だけを `runWithAllow` で囲むので、slot に入れた `rawPred` は呼び出し側の型に残る
 
 ## デモ（examples/blog）
 

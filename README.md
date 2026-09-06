@@ -23,16 +23,16 @@ Flix の PostgreSQL 向け DB ライブラリ。SQL はそのまま書き、文�
 - DB のエラーはエフェクト。拾いたい所でだけ拾い、他はそのまま上へ流れる
 - `.q` ファイルに素の SQL を書くと、型付きの関数とデコーダを生成する
 
-設計は [docs/design.md](docs/design.md)、実装の詳細は [docs/layer0.md](docs/layer0.md)（生 SQL の層）と [docs/layer1.md](docs/layer1.md)（`.q` と生成器）。
+設計は [docs/design.md](docs/design.md)、実装の詳細は [docs/layer0.md](docs/layer0.md)（`Sql` / `Decoder` / エフェクト）と [docs/layer1.md](docs/layer1.md)（`.q` と生成器）。
 動く例は [examples/blog](examples/blog/README.md)。
 
 ## 目次
 
 1. [準備](#1-準備)
-2. [生 SQL で使う](#2-生-sql-で使う)
-3. [`.q` から関数を生成する](#3-q-から関数を生成する)
-4. [`.q` の書き方](#4-q-の書き方)
-5. [動的な条件（断片 DSL）](#5-動的な条件断片-dsl)
+2. [`.q` から関数を生成する](#2-q-から関数を生成する)
+3. [`.q` の書き方](#3-q-の書き方)
+4. [動的な条件（断片 DSL）](#4-動的な条件断片-dsl)
+5. [生 SQL で書く（逃げ道）](#5-生-sql-で書く逃げ道)
 6. [エラーの扱い](#6-エラーの扱い)
 7. [Tx と再実行](#7-tx-と再実行)
 8. [テストの書き方](#8-テストの書き方)
@@ -57,68 +57,9 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 "org.postgresql:postgresql" = "42.7.4"
 ```
 
-## 2. 生 SQL で使う
+## 2. `.q` から関数を生成する
 
-一番下の層。`Sql.fetch` / `Sql.execute` に SQL とプレースホルダの値を渡す。プレースホルダは `$1` 形式で、psql や EXPLAIN にそのまま貼れる。
-
-```flix
-use SqlValue.SqlValue
-
-def renameUser(user: { id = Int64, name = String }): Int32 \ DbWrite =
-    Sql.execute("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str(user#name), SqlValue.Int64(user#id)})
-```
-
-結果は `Row` の列で返る。型を付けて受けるには `Decoder` を `forA` で組み、`Sql.fetchAs` に渡す。
-
-```flix
-pub type alias User = { id = Int64, name = String, email = Option[String] }
-
-def userDecoder(): Decoder[User] =
-    forA (
-        id <- Decoder.int64("id");
-        name <- Decoder.str("name");
-        email <- Decoder.opt(Decoder.str("email"))      // NULL を None に
-    ) yield { id = id, name = name, email = email }
-
-def findUserByEmail(email: String): Option[User] \ DbRead =
-    Sql.fetchOneAs(userDecoder(), "SELECT id, name, email FROM users WHERE email = $1", List#{SqlValue.Str(email)})
-
-def registerUser(user: { name = String, email = String }): Option[Int64] \ DbWrite =
-    Sql.executeReturningOneAs(Decoder.int64("id"),
-        "INSERT INTO users (name, email) VALUES ($1, $2) RETURNING id",
-        List#{SqlValue.Str(user#name), SqlValue.Str(user#email)})
-```
-
-| 関数 | 返す物 | 効果 |
-|---|---|---|
-| `Sql.fetch` / `fetchOne` | `List[Row]` / `Option[Row]` | `DbRead` |
-| `Sql.fetchAs` / `fetchOneAs` | デコードした値 | `DbRead` |
-| `Sql.execute` | 影響行数 `Int32` | `DbWrite` |
-| `Sql.executeReturningAs` / `executeReturningOneAs` | RETURNING の行をデコードした値 | `DbWrite` |
-
-デコードに失敗すると `DbErr.decodeError` が上がる。列が無い、型が違う、NULL 不可の列が NULL、の 3 種類で、静かに壊れない。
-
-値の型は `SqlValue` の 1 つの enum で、行きも帰りも同じ:
-
-```
-Null  Bool  Int32  Int64  Float64  Decimal(BigDecimal)  Str  Bytes
-Timestamp(epoch µs, UTC)  Date(epoch day)  Uuid  Json  Int64Array  StrArray
-```
-
-実行するには接続を開いて被せる:
-
-```flix
-def main(): Unit \ IO =
-    let config = { url = "jdbc:postgresql://127.0.0.1:5432/sqlfx", user = "flix", password = "flix" };
-    match DbError.runWithFailure(() -> Jdbc.withConnection(config, _ -> findUserByEmail("alice@example.com"))) {
-        case Ok(user) => println("${Option.map(u -> u#name, user)}")
-        case Err(failure) => println("db failed: ${failure}")
-    }
-```
-
-## 3. `.q` から関数を生成する
-
-生 SQL の層で毎回書くデコーダと `SqlValue` の包み直しを、生成器に任せる。
+`.q` に SQL を書くと、行レコード・デコーダ・型付きの関数を生成器が出す。これが既定の道で、生 SQL（§5）は `.q` で書けない文のための逃げ道。
 
 ```
    migrations/*.sql ──┐
@@ -159,7 +100,7 @@ pub def findUser(id: Int64): Option[FindUserRow] \ DbRead
 UsersQueries.insertUser({ name = "alice", email = "alice@example.com", role = "member" })
 ```
 
-## 4. `.q` の書き方
+## 3. `.q` の書き方
 
 ```
 // 行コメント
@@ -230,7 +171,7 @@ query searchUsers(limit: Int64) -> many
 - query 名・引数名・slot 名は Flix の識別子になるので、予約語（`type` `alias` `run` など）と内部名（`sql` `params`）は生成時にエラー
 - 読める DDL は CREATE TABLE / DROP TABLE / ALTER TABLE の ADD・DROP・ALTER COLUMN・RENAME COLUMN。制約と INDEX は無視、他は警告
 
-## 5. 動的な条件（断片 DSL）
+## 4. 動的な条件（断片 DSL）
 
 `{slot}` に入れる述語と並び順を、型付きの値として組む。列は生成された `UsersTable.name()` のような物からしか来ないので、識別子の混入が起きない。値は必ず `$n` になる。
 
@@ -253,14 +194,96 @@ def activeUsersNamed(search: { prefix = String, limit = Int64 }): List[SearchUse
              LIMIT $1                                  params: [10, "a%"]
 ```
 
-| 述語 | 並び順 |
-|---|---|
-| `eq ne lt le gt ge like isNull isNotNull inList` | `asc desc then` |
-| `both either negate`（`and` `or` `not` は予約語） | `unordered()` |
-| `when(cond, pred)` `all(preds)` `any(preds)` `always()` | |
+| 比較 | 述語 | 並び順 |
+|---|---|---|
+| `=== =!= << <<= >> >>=`（左は列、右は列か `value(x)`） | `like inList` | `asc desc then` |
+| | `isNull isNotNull`（NULL 可の列だけ） | `unordered()` |
+| | `both either negate`（`and` `or` `not` は予約語） | |
+| | `when(cond, pred)` `all(preds)` `any(preds)` `always()` | |
 
 `both` は `always()` を消して繋ぐので、`when` が偽のときに `TRUE AND` が SQL に残らない。`inList` の空は `FALSE`。
-生 SQL を断片に入れたいときは `Fragment.rawPred(sql)` で、呼ぶ側に `RawSql` エフェクトが付く（監査箇所が型から列挙できる）。
+
+列の型は `Col[UsersTable, String, NotNull]` のように、テーブル・Flix の型・NULL 可否の 3 つを持つ。DDL の `NOT NULL` を生成器が写す。値は `Fragment.value(x)` で同じ型の項にする。
+
+```flix
+use Fragment.{===, >>};   // ファイルの先頭か mod の先頭に 1 回
+
+UsersTable.id() === Fragment.value(3i64)           // (id = $1)
+UsersTable.deletedAt() >> UsersTable.createdAt()   // (deleted_at > created_at)。値は積まない
+Fragment.isNotNull(UsersTable.email())             // email は NULL 可なので書ける
+Fragment.isNotNull(UsersTable.name())              // 型エラー。name は NOT NULL
+UsersTable.id() === Fragment.value("3")            // 型エラー。Int64 と String
+PostsTable.views() >> PostsTable.title()           // 型エラー。Int32 と String
+PostsTable.userId() === UsersTable.id()            // 型エラー。テーブルが違う（JOIN 条件は .q に書く）
+Fragment.value(1) === UsersTable.id()              // 型エラー。左辺は列
+```
+
+`>` `<` `==` などは Flix の組み込みで定義し直せないので、`=` `<>` は Slick と同じ `===` `=!=`、順序は文字を重ねた綴りにしている。`>>` は Prelude の関数合成と同じ綴りだが、`use Fragment.{>>}` を書いたスコープだけ列比較になる。
+生 SQL を断片に入れたいときは `Fragment.rawPred(sql)` で、呼ぶ側に `RawSql` エフェクトが付く（§5 と同じ標識。生成された関数の中で許可されることはなく、呼び出し側の型に残る）。
+
+## 5. 生 SQL で書く（逃げ道）
+
+`.q` に書けない文（CTE、DDL、`SET`、`EXPLAIN`）や、その場限りの SQL は `Sql.fetch` / `Sql.execute` に文字列で渡せる。
+生の文字列を渡す関数には `RawSql` エフェクトが付き、それを呼ぶ関数の型にも伝わる。生 SQL に依存する箇所が型シグネチャから列挙でき、境界で `RawSql.runWithAllow` を書いた所が監査点になる。`.q` から生成した関数には付かない（生成器が検査した SQL なので、生成コードが自分で許可している）。
+
+```flix
+use SqlValue.SqlValue
+
+def renameUser(user: { id = Int64, name = String }): Int32 \ DbWrite + RawSql =
+    Sql.execute("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str(user#name), SqlValue.Int64(user#id)})
+```
+
+結果は `Row` の列で返る。型を付けて受けるには `Decoder` を `forA` で組み、`Sql.fetchAs` に渡す。SELECT 句は `Decoder.selectClause` で組めるので、列名を書くのはデコーダの 1 回だけになる。
+
+```flix
+pub type alias User = { id = Int64, name = String, email = Option[String] }
+
+def userDecoder(): Decoder[User] =
+    forA (
+        id <- Decoder.int64("id");
+        name <- Decoder.str("name");
+        email <- Decoder.opt(Decoder.str("email"))      // NULL を None に
+    ) yield { id = id, name = name, email = email }
+
+def findUserByEmail(email: String): Option[User] \ DbRead + RawSql =
+    Sql.fetchOneAs(userDecoder(), "SELECT ${Decoder.selectClause(userDecoder())} FROM users WHERE email = $1", List#{SqlValue.Str(email)})
+    // => SELECT id, name, email FROM users WHERE email = $1
+
+def countPosts(): Int64 \ DbRead + RawSql =
+    let count = Decoder.selectExpr("count(*)::bigint", Decoder.int64("n"));   // count(*)::bigint AS n
+    Sql.fetchOneAs(count, "SELECT ${Decoder.selectClause(count)} FROM posts", Nil) |> Option.getWithDefault(0i64)
+```
+
+| 関数 | 返す物 | 効果 |
+|---|---|---|
+| `Sql.fetch` / `fetchOne` | `List[Row]` / `Option[Row]` | `DbRead + RawSql` |
+| `Sql.fetchAs` / `fetchOneAs` | デコードした値 | `DbRead + RawSql` |
+| `Sql.execute` | 影響行数 `Int32` | `DbWrite + RawSql` |
+| `Sql.executeReturningAs` / `executeReturningOneAs` | RETURNING の行をデコードした値 | `DbWrite + RawSql` |
+
+デコードに失敗すると `DbErr.decodeError` が上がる。列が無い、型が違う、NULL 不可の列が NULL、の 3 種類で、静かに壊れない。
+
+値の型は `SqlValue` の 1 つの enum で、行きも帰りも同じ:
+
+```
+Null  Bool  Int32  Int64  Float64  Decimal(BigDecimal)  Str  Bytes
+Timestamp(epoch µs, UTC)  Date(epoch day)  Uuid  Json  Int64Array  StrArray
+```
+
+実行するには接続を開いて被せる。生 SQL を使う関数を呼ぶ境界では `RawSql.runWithAllow` で許可する。
+
+```flix
+def main(): Unit \ IO =
+    let config = { url = "jdbc:postgresql://127.0.0.1:5432/sqlfx", user = "flix", password = "flix" };
+    let found = DbError.runWithFailure(() -> RawSql.runWithAllow(() ->
+        Jdbc.withConnection(config, _ -> findUserByEmail("alice@example.com"))));
+    match found {
+        case Ok(user) => println("${Option.map(u -> u#name, user)}")
+        case Err(failure) => println("db failed: ${failure}")
+    }
+```
+
+`RawSql` は防止のための物ではなく、責任の所在を示す物。書ける SQL は変わらない。生 SQL を使う関数は効果を明示して書く（書き忘れると純粋な関数と見なされ、本体で `Sql.*` を呼んだ時点でコンパイルエラーになる）。
 
 ## 6. エラーの扱い
 

@@ -1,6 +1,6 @@
 # examples/blog
 
-sqlfx のデモ。ブログ（users / posts）を題材に、`.q` から生成した関数と、生 SQL をインラインで書く 2 つの書き方を並べる。
+sqlfx のデモ。ブログ（users / posts）を題材に、`.q` から生成した関数（既定の道）と、生 SQL をインラインで書く逃げ道を並べる。生 SQL 版は型に `RawSql` が出る。
 
 ```
 migrations/     DDL。机上のスキーマの元になり、テストでは実 PG にそのまま流す

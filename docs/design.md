@@ -145,13 +145,14 @@ searchUsers(50,
     order  = by(req.sortKey))
 ```
 
-- `Col[row, a]` はファントム型付きカラム値(codegen が吐く)。文字列カラム名は書かない
+- `Col[row, a, n]` はファントム型付きカラム値(codegen が吐く)。文字列カラム名は書かない。`n` は `NotNull` / `Nullable` で、`isNull` は `Nullable` の列にだけ書ける
+- 比較は `=== =!= << <<= >> >>=`。左は列、右は列か `Fragment.value(x)`。`>` などは Flix の組み込みで定義し直せない（`docs/spikes.md`）
 - 実装では `and` / `or` / `not` が Flix の予約語なので `both` / `either` / `negate`。`by` は `asc` / `desc` / `then`（`docs/layer1.md`）
 - `Pred[users]` 型で「どのテーブルの列を参照できる断片か」を宣言
 - 値は必ず `EParam` ノード → プレースホルダへ。識別子は Col 経由のみ =
   **SQLインジェクションが構造的に不可能**(動的識別子は自然と許可リスト化)
 - render は (SQL文字列, パラメータ列) のペアを返す再帰で順序整合を構造保証。括弧は全付け
-- 生SQL エスケープハッチは `RawSql` エフェクトで標識化(監査箇所が型から列挙できる)
+- 生SQL エスケープハッチは `RawSql` エフェクトで標識化(監査箇所が型から列挙できる)。`Sql.fetch` / `Sql.execute` に文字列を渡す入口にも付け、生成コードだけが自分で許可する
 
 ## 6. 関係取得(N+1対策)
 
@@ -247,7 +248,7 @@ v4:       LSP + EXPLAIN テスト統合 + ドキュメント
 ## 12. 設計上の未決事項(実装時に決める)
 
 - Tx ネストの扱い(セーブポイント vs 型エラー)。v0 では型エラー固定
-- 断片DSLの演算子セット(.>, .==, like, isNull, in の初期範囲)
+- 断片DSLの演算子セット。列と値・列と列・isNull までは入れた。式（算術・関数）は未着手
 - `Pred[users]` の row 型の付け方(codegen が吐くマーカー型の設計)
 - streamQuery の each に許すエフェクトの範囲
 - reclassify ハンドラの API 形状

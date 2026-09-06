@@ -1,3 +1,4 @@
+use Fragment.{===}
 use DbError.DbFailure
 use Blog.RegisterError
 
@@ -30,7 +31,7 @@ def testPgPublishNewPost(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let result = BlogTestSupport.withSeed(() -> {
         let id = Blog.publishNewPost({ author = 3i64, title = "Carol says hi", body = "", tags = List#{"hello"} });
         let seen = id |> Option.flatMap(PostsQueries.postWithAuthor) |> Option.map(Views.ofPostWithAuthorRow);
-        let published = PostsQueries.publishedPosts(10i64, Fragment.eq(PostsTable.userId(), 3i64)) |> List.map(row -> row#title);
+        let published = PostsQueries.publishedPosts(10i64, PostsTable.userId() === Fragment.value(3i64)) |> List.map(row -> row#title);
         (id, seen, published)
     });
     Assert.assertEq(expected = Ok((

@@ -106,7 +106,6 @@ pub enum DecodeError with Eq, ToString {
 |---|---|
 | `int32(name)` / `int64(name)` / `str(name)` / `bool(name)` / `float64(name)` / `decimal(name)` / `bytes(name)` / `timestamp(name)` / `date(name)` / `uuid(name)` / `json(name)` / `int64Array(name)` / `strArray(name)` | `String -> Decoder[a]` |
 | `column(name)` | `String -> Decoder[SqlValue]`（型を決めずに取る） |
-| `flatMap(f, d)` | `(a -> Decoder[b]) -> Decoder[a] -> Decoder[b]` |
 | `opt(d)` | `Decoder[a] -> Decoder[Option[a]]`（Null を None に） |
 | `map(f, d)` | `(a -> b) -> Decoder[a] -> Decoder[b]` |
 | `ap(df, da)` | `Decoder[a -> b] -> Decoder[a] -> Decoder[b]`（複数列をレコードへ） |
@@ -130,7 +129,7 @@ pub eff SqlWrite { def execute(sql: String, params: List[SqlValue]): Int32 }
   JDBC ハンドラが `JdbcConvert.rewritePlaceholders`（純粋）で `?` に書き換え、出現順にパラメータを並べ直す。
   同じ `$1` を 2 回書けば値も 2 回送る。params に無い `$n` は `DbErr.other`
 - `one` 相当（`Option[Row]`）は `fetch` の上の関数 `Sql.fetchOne` で作る（op を増やさない）
-- `Sql.fetchAs(decoder, sql, params): List[a] \ {SqlRead, DbErr}` と `Sql.fetchOneAs` がデコードまで行い、
+- `Sql.fetchAs(decoder, sql, params): List[a] \ DbRead + RawSql` と `Sql.fetchOneAs` がデコードまで行い、
   失敗は `DbErr.decodeError` に持ち上げる
 
 ## エラー 2 分類
@@ -294,7 +293,9 @@ pub def registerUser(name: String, email: String): Result[RegisterError, Int64] 
 - `SqlWrite.executeReturning(sql, params): List[Row]`: `INSERT ... RETURNING` のように書いた上で行も返す文。
   `Sql.executeReturningAs` / `executeReturningOneAs` でデコードする。書き込みなので効果は `{SqlWrite, DbErr}`
 - `Jdbc.withConnection(config, conn -> ...)`: 開いて `runWithConnection` を被せ、成功でも失敗でも閉じる。Tx が要るなら中で `Tx.withTx(conn, ...)`
-- `Decoder` は `Functor` / `Applicative` / `Monad` の instance を持つので `forA` で列を並べて組める（yield は純粋に書く）
+- `Decoder` は `Functor` / `Applicative` の instance を持つので `forA` で列を並べて組める（yield は純粋に書く）。`Monad` は付けない（次に読む列が値で決まると SELECT 句を静的に組めない）
+- `Decoder` は読む列の一覧を持つ。`Decoder.selectList` / `selectClause` で SELECT 句を組み、`selectExpr(expr, d)` で `expr AS label` の式の列を作る
+- 生の SQL 文字列を渡す `Sql.*` には `RawSql` が付く（`src/Db/RawSql.flix`）。防止ではなく責任の所在を示す標識で、境界と生成コードが `RawSql.runWithAllow` で許可する。生成関数の許可は生成器の文字列だけを囲み、slot の `Fragment.rawPred` は呼び出し側に残る
 - `DbTest.runRecordingWith(rowsFor, affected, thunk)`: SQL ごとに行を返しつつ記録する。preload の「クエリは 2 つ」を確かめるのに使う
 - `--` から行末は JDBC ハンドラでも落とす（コメント中の `'` や `$1` を見ないため）
 - `Preload.attach({ parents, parentKey, children, childKey })`: IN 句バッチで取った子を親ごとに束ねる。子は元の順、無い親は Nil。`keyed` の preloader 生成（フェーズ 3）もこれを呼ぶ

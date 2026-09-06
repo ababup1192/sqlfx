@@ -17,11 +17,11 @@ def pgConfig(): Jdbc.ConnectionConfig \ IO =
     } with Sys.Env.runWithIO
 
 /// 接続を開いて body を走らせ、必ず閉じる。失敗は DbFailure に落とす。
-def withPg(body: Unit -> a \ Db + IO): Result[DbFailure, a] \ IO =
-    DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), _ -> body()))
+def withPg(body: Unit -> a \ Db + IO + RawSql): Result[DbFailure, a] \ IO =
+    DbError.runWithFailure(() -> RawSql.runWithAllow(() -> Jdbc.withConnection(pgConfig(), _ -> body())))
 
 /// テーブルを作り直す。
-def resetUsers(): Unit \ DbWrite =
+def resetUsers(): Unit \ DbWrite + RawSql =
     let _ = Sql.execute("DROP TABLE IF EXISTS sqlfx_test_users", Nil);
     let _ = Sql.execute(
         "CREATE TABLE sqlfx_test_users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE, "
@@ -107,7 +107,7 @@ def testPgListUsersShape(): Unit \ {Assert, IO} =
 ///   ROLLBACK
 @Test
 def testPgTxRollsBackOnDbErr(): Unit \ {Assert, IO} =
-    let result = DbError.runWithFailure(() -> {
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> {
         let conn = Jdbc.connect(pgConfig());
         let _ = Jdbc.runWithConnection(conn, resetUsers);
         let failed = DbError.runWithFailure(() -> Tx.withTx(conn, () -> {
@@ -118,13 +118,13 @@ def testPgTxRollsBackOnDbErr(): Unit \ {Assert, IO} =
         let remaining = Jdbc.runWithConnection(conn, () -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
         Jdbc.close(conn);
         (failed, remaining)
-    });
+    }));
     Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_email_key")), 0)), result)
 
 /// withTx は正常なら COMMIT する: 別接続から行が見える。
 @Test
 def testPgTxCommits(): Unit \ {Assert, IO} =
-    let result = DbError.runWithFailure(() -> {
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> {
         let config = pgConfig();
         let conn = Jdbc.connect(config);
         let _ = Jdbc.runWithConnection(conn, resetUsers);
@@ -137,7 +137,7 @@ def testPgTxCommits(): Unit \ {Assert, IO} =
         let seen = Jdbc.runWithConnection(other, () -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
         Jdbc.close(other);
         seen
-    });
+    }));
     Assert.assertEq(expected = Ok(1), result)
 
 // ---- NULL と型の網羅 ----
@@ -180,7 +180,7 @@ def testPgDecodeErrorIsDbErr(): Unit \ {Assert, IO} =
 /// withConnection は失敗しても接続を閉じ、エラーはそのまま上がる。
 @Test
 def testPgWithConnectionClosesOnError(): Unit \ {Assert, IO} =
-    let result = DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), _ -> Sql.fetch("SELECT 1 FROM sqlfx_no_such_table", Nil)))
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), _ -> Sql.fetch("SELECT 1 FROM sqlfx_no_such_table", Nil))))
         |> Result.mapErr(failure -> String.startsWith(prefix = "Permanent(schemaMismatch", "${failure}"))
         |> Result.map(List.length);
     Assert.assertEq(expected = Err(true), result)
@@ -191,7 +191,7 @@ def testPgWithConnectionClosesOnError(): Unit \ {Assert, IO} =
 ///   その後の INSERT が普通に見える = autocommit に戻っている
 @Test
 def testPgCommitFailureIsTranslated(): Unit \ {Assert, IO} =
-    let result = DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), conn -> {
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), conn -> {
         resetUsers();
         discard Sql.execute("ALTER TABLE sqlfx_test_users ADD CONSTRAINT sqlfx_test_users_name_deferred UNIQUE (name) DEFERRABLE INITIALLY DEFERRED", Nil);
         let failed = DbError.runWithFailure(() -> Tx.withTx(conn, () -> {
@@ -201,5 +201,5 @@ def testPgCommitFailureIsTranslated(): Unit \ {Assert, IO} =
         discard Sql.execute("INSERT INTO sqlfx_test_users (name, created_at) VALUES ('after', now())", Nil);
         let seen = Jdbc.withConnection(pgConfig(), _ -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
         (failed, seen)
-    }));
+    })));
     Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_name_deferred")), 1)), result)
