@@ -1,10 +1,10 @@
 ///
-/// 断片 DSL（design.md §5）。`.q` の `{slot}` に入れる述語と並び順を、型付きの値として組む。
+/// 断片 DSL（design.md §5）。`.q` の `{slot}` に入れる述語・並び順・SET 句を、型付きの値として組む。
 /// 値は必ずプレースホルダになり、識別子は Col を通した物しか出ないので、SQL インジェクションが構造的に起きない。
 ///
 mod Fragment {
 
-    // 利用者が呼ぶのは組み立ての関数と演算子（=== ... all / asc desc then）。render 系は生成コードが呼ぶ。
+    // 利用者が呼ぶのは組み立ての関数と演算子（=== ... all / asc desc thenAsc thenDesc / set setNull ...）。render 系は生成コードが呼ぶ。
     // and / or / not は Flix の予約語なので both / either / negate と名付けている。
 
     use SqlValue.SqlValue
@@ -49,6 +49,16 @@ mod Fragment {
     instance IsColumn[Nullable]
 
     ///
+    /// 型 `a` が数値である証拠。`increment` はこれを要求する（`col + $n` が文字列で通らないように）。
+    ///
+    pub trait IsNumber[a: Type]
+
+    instance IsNumber[Int32]
+    instance IsNumber[Int64]
+    instance IsNumber[Float64]
+    instance IsNumber[BigDecimal]
+
+    ///
     /// 比較演算子。文字列で持たないのは、`render` が出す物を閉じた集合にするため。
     ///
     pub enum CompareOp with Eq, Order, ToString {
@@ -90,7 +100,30 @@ mod Fragment {
         case Unordered
         case Asc(String)
         case Desc(String)
+        /// 前の並び順に 1 キー足す
         case Then(Order[row], Order[row])
+    }
+
+    ///
+    /// SET 句の代入 1 つ。列名は Col からしか来ない。
+    ///
+    pub enum Assignment with Eq, Order, ToString {
+        /// `col = $n`
+        case Assign(String, SqlValue)
+        /// `col = NULL`。$n で Null を送っても動くが、psql に貼って読める形を取る
+        case AssignNull(String)
+        /// `col = col + $n`
+        case Increment(String, SqlValue)
+        /// 生 SQL。作るには RawSql エフェクトが要る
+        case Raw(String)
+    }
+
+    ///
+    /// テーブル `row` の列への代入の並び。`noChange()` から `set` などで積み上げる。
+    /// 空のままなら生成関数は文を DB に出さず 0 を返す。
+    ///
+    pub enum Changes[_row: Type] {
+        case Changes(List[Assignment])
     }
 
     // ---- 組み立て ----
@@ -188,7 +221,77 @@ mod Fragment {
 
     pub def asc(col: Col[row, a, n]): Order[row] with IsColumn[n] = Order.Asc(colName(col))
     pub def desc(col: Col[row, a, n]): Order[row] with IsColumn[n] = Order.Desc(colName(col))
-    pub def then(first: Order[row], second: Order[row]): Order[row] = Order.Then(first, second)
+
+    ///
+    /// 並び順にキーを足す。`Fragment.desc(createdAt) |> Fragment.thenDesc(id)`。
+    ///
+    pub def thenAsc(col: Col[row, a, n], order: Order[row]): Order[row] with IsColumn[n] = Order.Then(order, Order.Asc(colName(col)))
+    pub def thenDesc(col: Col[row, a, n], order: Order[row]): Order[row] with IsColumn[n] = Order.Then(order, Order.Desc(colName(col)))
+
+    // ---- SET 句 ----
+    // 積み上げ先の Changes を最後に受けるので、`noChange() |> set(...) |> setIfSome(...)` と 1 行 1 列で書ける。
+
+    ///
+    /// 何も変えない。積み上げの起点。
+    ///
+    pub def noChange(): Changes[row] = Changes.Changes(Nil)
+
+    ///
+    /// `col = $n`。
+    ///
+    pub def set(col: Col[row, a, n], x: a, changes: Changes[row]): Changes[row] with IsColumn[n] =
+        let (name, toSql) = column(col);
+        push(Assignment.Assign(name, toSql(x)), changes)
+
+    ///
+    /// `col = NULL`。NULL を取れる列にだけ書ける。
+    ///
+    pub def setNull(col: Col[row, a, Nullable], changes: Changes[row]): Changes[row] =
+        push(Assignment.AssignNull(colName(col)), changes)
+
+    ///
+    /// Some なら `set`、None なら触らない。フォームの「未入力」用。
+    /// 行型（SELECT の結果）の Nullable 列は `Option[a]` なので、そのまま渡すと NULL が「変えない」になる。行の値を書き戻すなら `setOrNull`。
+    ///
+    pub def setIfSome(col: Col[row, a, n], x: Option[a], changes: Changes[row]): Changes[row] with IsColumn[n] =
+        match x {
+            case Some(v) => set(col, v, changes)
+            case None => changes
+        }
+
+    ///
+    /// Some なら `set`、None なら `setNull`。行型の Option をそのまま書き戻すのに使う。
+    ///
+    pub def setOrNull(col: Col[row, a, Nullable], x: Option[a], changes: Changes[row]): Changes[row] =
+        match x {
+            case Some(v) => set(col, v, changes)
+            case None => setNull(col, changes)
+        }
+
+    ///
+    /// `col = col + $n`。数値の列だけ。
+    ///
+    pub def increment(col: Col[row, a, n], by: a, changes: Changes[row]): Changes[row] with IsColumn[n], IsNumber[a] =
+        let (name, toSql) = column(col);
+        push(Assignment.Increment(name, toSql(by)), changes)
+
+    ///
+    /// 生の代入（`views = views + 1` など）。RawSql が付くので、呼ぶ側の型に監査箇所が出る。同じ列の重複は畳まない。
+    ///
+    pub def rawSet(sql: String, changes: Changes[row]): Changes[row] \ RawSql =
+        RawSql.allow(sql);
+        push(Assignment.Raw(sql), changes)
+
+    ///
+    /// 代入が 1 つも無いか。生成関数はこのとき文を出さない。
+    ///
+    pub def isEmptyChanges(changes: Changes[row]): Bool =
+        let Changes.Changes(assignments) = changes;
+        List.isEmpty(assignments)
+
+    def push(assignment: Assignment, changes: Changes[row]): Changes[row] =
+        let Changes.Changes(assignments) = changes;
+        Changes.Changes(List.append(assignments, List#{assignment}))
 
     // ---- render ----
 
@@ -253,6 +356,44 @@ mod Fragment {
             case Nil => ""
             case terms => "ORDER BY " + List.join(", ", terms)
         }
+
+    ///
+    /// SET 句の中身を、既にあるパラメータ列の後ろに繋ぐ。`title = $2, body = $3` の形で、`SET` は付けない。
+    /// 同じ列を 2 回代入していたら後の物だけ出す（PG は同じ列への複数代入をエラーにする）。`rawSet` は畳めないので、そのまま出す。
+    ///
+    pub def appendChanges(changes: Changes[row], params: List[SqlValue]): (String, List[SqlValue]) =
+        let Changes.Changes(assignments) = changes;
+        let (terms, reversedParams, _) = List.foldLeft((state, assignment) -> {
+            let (acc, added, next) = state;
+            match assignment {
+                case Assignment.Assign(col, x) => ("${col} = $${next}" :: acc, x :: added, next + 1)
+                case Assignment.AssignNull(col) => ("${col} = NULL" :: acc, added, next)
+                case Assignment.Increment(col, x) => ("${col} = ${col} + $${next}" :: acc, x :: added, next + 1)
+                case Assignment.Raw(sql) => (sql :: acc, added, next)
+            }
+        }, (Nil, Nil, List.length(params) + 1), lastWins(assignments));
+        (List.reverse(terms) |> List.join(", "), List.append(params, List.reverse(reversedParams)))
+
+    ///
+    /// 同じ列への代入は最後の物だけ残す。位置も最後の物の位置。Raw は列名を持たないので常に残す。
+    ///
+    def lastWins(assignments: List[Assignment]): List[Assignment] =
+        let (kept, _) = List.foldRight((assignment, state) -> {
+            let (acc, seen) = state;
+            match assignedColumn(assignment) {
+                case Some(col) if Set.memberOf(col, seen) => (acc, seen)
+                case Some(col) => (assignment :: acc, Set.insert(col, seen))
+                case None => (assignment :: acc, seen)
+            }
+        }, (Nil, Set.empty()), assignments);
+        kept
+
+    def assignedColumn(assignment: Assignment): Option[String] = match assignment {
+        case Assignment.Assign(col, _) => Some(col)
+        case Assignment.AssignNull(col) => Some(col)
+        case Assignment.Increment(col, _) => Some(col)
+        case Assignment.Raw(_) => None
+    }
 
     def orderTerms(order: Order[row]): List[String] = match order {
         case Order.Unordered => Nil

@@ -60,7 +60,8 @@ def testResolveWrites(): Unit \ Assert =
         |> Result.map(List.map(resolved -> resolved#writes));
     Assert.assertEq(expected = Ok(List#{false, true, true}), writes)
 
-/// 解決の失敗: 無いテーブル / 無い列 / 曖昧な列 / 型の無い式 / one に RETURNING 無しの UPDATE / exec に RETURNING / keyed が結果に無い / slot のテーブルが FROM に無い。
+/// 解決の失敗: 無いテーブル / 無い列 / 曖昧な列 / 型の無い式 / one に RETURNING 無しの UPDATE / exec に RETURNING / keyed が結果に無い / slot のテーブルが FROM に無い
+/// / Changes が exec 以外 / Changes のテーブルが UPDATE の対象でない（FROM にはある）。
 @Test
 def testResolveErrors(): Unit \ Assert =
     let errors = List#{
@@ -71,7 +72,9 @@ def testResolveErrors(): Unit \ Assert =
         "query a() -> one { UPDATE users SET name = 'x' }",
         "query a() -> exec { UPDATE users SET name = 'x' RETURNING id }",
         "query a() -> many keyed(user_id) { SELECT id FROM posts }",
-        "query a() -> many with f: Pred[posts] { SELECT id FROM users WHERE {f} }"
+        "query a() -> many with f: Pred[posts] { SELECT id FROM users WHERE {f} }",
+        "query a() -> one with c: Changes[users] { UPDATE users SET {c} RETURNING id }",
+        "query a() -> exec with c: Changes[users] { UPDATE posts SET {c} FROM users WHERE users.id = posts.user_id }"
     } |> List.map(source -> QParser.parseFile(source) |> Result.mapErr(_ -> ResolveError.UnknownTable("parse", "")) |> Result.flatMap(queries -> Result.traverse(QResolve.resolve(blogSchema()), queries)) |> Result.map(List.length));
     Assert.assertEq(expected = List#{
         Err(ResolveError.UnknownTable("a", "nope")),
@@ -81,5 +84,7 @@ def testResolveErrors(): Unit \ Assert =
         Err(ResolveError.UnsupportedStatement("a", "UPDATE")),
         Err(ResolveError.UnsupportedStatement("a", "UPDATE")),
         Err(ResolveError.KeyedNotInResult("a", "user_id")),
-        Err(ResolveError.SlotTableNotInFrom("a", "f", "posts"))
+        Err(ResolveError.SlotTableNotInFrom("a", "f", "posts")),
+        Err(ResolveError.ChangesSlotRequiresExec("a", "c")),
+        Err(ResolveError.ChangesSlotNotUpdateTarget("a", "c", "users"))
     }, errors)

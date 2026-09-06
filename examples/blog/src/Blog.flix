@@ -17,12 +17,34 @@ mod Blog {
     pub type alias UserWithPosts = { user = SearchUsersRow, posts = List[PostsByUsersRow] }
 
     ///
-    /// 登録が業務として失敗する理由。DB のエラーのうち、アプリが分岐したい物だけを値にする。
+    /// 登録が業務として失敗する理由。DB の制約違反のうち、アプリが分岐したい物。
+    /// DbErr と同じくエフェクトで上げるので、途中の関数は戻り値を包まず、境界で 1 回ハンドリングする。
     ///
-    pub enum RegisterError with Eq, Order, ToString {
+    pub eff RegisterErr {
         /// その email は既に使われている
-        case EmailTaken(String)
+        def emailTaken(email: String): Void
+        /// name が長すぎる（DDL の users_name_length）
+        def nameTooLong(): Void
     }
+
+    ///
+    /// RegisterErr を 1 層の値にした形。DbFailure と同じく境界（HTTP ハンドラ / テスト）用で、`runRegister` が返す。
+    ///
+    pub enum RegisterFailure with Eq, Order, ToString {
+        case EmailTaken(String)
+        case NameTooLong
+    }
+
+    ///
+    /// RegisterErr を Result に落とす。境界で使う。
+    ///
+    pub def runRegister(thunk: Unit -> a \ ef): Result[RegisterFailure, a] \ ef - RegisterErr =
+        run {
+            Ok(thunk())
+        } with handler RegisterErr {
+            def emailTaken(email, _resume) = Err(RegisterFailure.EmailTaken(email))
+            def nameTooLong(_resume) = Err(RegisterFailure.NameTooLong)
+        }
 
     ///
     /// 新しい記事。
@@ -46,16 +68,30 @@ mod Blog {
     pub type alias UserSearch = { prefix = String, limit = Int64 }
 
     ///
-    /// 投稿者を登録して id を返す。email の重複は unique 違反として上がるので、ここで業務のエラーに変える。
-    /// それ以外の DB エラーはそのまま上へ流す（`DbError.raise`）。
+    /// 投稿者を登録して id を返す。制約違反は生成された `UsersTable.onConstraint` で業務エラーに翻訳する。
+    /// enum に無い名前の違反と、制約違反以外の DB エラーはそのまま上へ流れる。
     ///
-    pub def registerUser(user: NewUser): Result[RegisterError, Int64] \ DbWrite =
-        match DbError.runWithKind(() -> UsersQueries.insertUser({ name = user#name, email = user#email, role = "member" })) {
-            case Ok(Some(row)) => Ok(row#id)
-            case Ok(None) => DbErr.other("INSERT ... RETURNING returned no row")
-            case Err(DbErrorKind.UniqueViolation("users_email_key")) => Err(RegisterError.EmailTaken(user#email))
-            case Err(kind) => DbError.raise(kind)
-        }
+    /// WhyNot: 制約名の文字列で分岐しないのは、DDL に制約を足したときに翻訳の書き忘れをコンパイルで見つけるため。
+    ///
+    pub def registerUser(user: NewUser): Int64 \ DbWrite + RegisterErr =
+        UsersTable.onConstraint(translateUserConstraint(user#email), () ->
+            UsersQueries.insertUser({ name = user#name, email = user#email, role = "member" }) |> expectRow)
+
+    ///
+    /// users の制約違反 → 業務エラー。email は EmailTaken に載せる分。
+    ///
+    def translateUserConstraint(email: String, constraint: UsersTable.Constraint): a \ RegisterErr = match constraint {
+        case UsersTable.Constraint.EmailKey => RegisterErr.emailTaken(email)
+        case UsersTable.Constraint.NameLength => RegisterErr.nameTooLong()
+    }
+
+    ///
+    /// RETURNING id の行。無いのは DB かドライバの異常なので DbErr にする。
+    ///
+    def expectRow(row: Option[{ id = Int64 }]): Int64 \ DbErr = match row {
+        case Some(found) => found#id
+        case None => DbErr.other("INSERT ... RETURNING returned no row")
+    }
 
     ///
     /// 名前が prefix で始まる、削除されていない投稿者を名前順で。prefix が空なら全員。
@@ -88,6 +124,32 @@ mod Blog {
         let inserted = PostsQueries.insertPost({ userId = post#author, title = post#title, body = post#body, tags = post#tags }) |> Option.map(row -> row#id);
         Option.forEach(id -> discard PostsQueries.publishPost(id), inserted);
         inserted
+
+    ///
+    /// 記事の編集フォーム。None は「触っていない」。
+    ///
+    /// - `title`: 題名
+    /// - `body`: 本文
+    /// - `published`: 公開するか
+    ///
+    pub type alias PostEdit = { title = Option[String], body = Option[String], published = Option[Bool] }
+
+    ///
+    /// 記事を編集する。触った項目だけ UPDATE に出る。何も触っていなければ DB に出さず 0。
+    /// 「記事が無い」と「何も触っていない」はどちらも 0 なので、区別したければ先に postWithAuthor で読む。
+    ///
+    pub def editPost(id: Int64, edit: PostEdit): Int32 \ DbWrite =
+        Fragment.noChange()
+            |> Fragment.setIfSome(PostsTable.title(), edit#title)
+            |> Fragment.setIfSome(PostsTable.body(), edit#body)
+            |> Fragment.setIfSome(PostsTable.published(), edit#published)
+            |> PostsQueries.updatePost(id)
+
+    ///
+    /// 投稿者の email を外す（NULL にする）。退会済みなら 0。
+    ///
+    pub def clearEmail(id: Int64): Int32 \ DbWrite =
+        Fragment.noChange() |> Fragment.setNull(UsersTable.email()) |> UsersQueries.updateUser(id)
 
     ///
     /// 投稿者を退会させる。記事を消してから soft delete。1 つの Tx で呼ぶこと。

@@ -1,6 +1,7 @@
 use Fragment.{===}
 use DbError.DbFailure
-use Blog.RegisterError
+use DbError.DbErrorKind
+use Blog.RegisterFailure
 
 // Blog のユースケース（生成コード版）を実 PostgreSQL で通しで動かす。クエリ単体は TestQueriesPg。
 
@@ -8,11 +9,11 @@ use Blog.RegisterError
 @Test
 def testPgRegisterUser(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let result = BlogTestSupport.withDb(() -> (
-        Blog.registerUser({ name = "alice", email = "alice@example.com" }),
-        Blog.registerUser({ name = "alice2", email = "alice@example.com" }),
+        Blog.runRegister(() -> Blog.registerUser({ name = "alice", email = "alice@example.com" })),
+        Blog.runRegister(() -> Blog.registerUser({ name = "alice2", email = "alice@example.com" })),
         UsersQueries.countUsers() |> Option.flatMap(row -> row#total)
     ));
-    Assert.assertEq(expected = Ok((Ok(1i64), Err(RegisterError.EmailTaken("alice@example.com")), Some(1i64))), result)
+    Assert.assertEq(expected = Ok((Ok(1i64), Err(RegisterFailure.EmailTaken("alice@example.com")), Some(1i64))), result)
 
 /// activeUsersNamed: prefix で前方一致、名前順。prefix が空なら全員。
 ///
@@ -20,7 +21,7 @@ def testPgRegisterUser(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
 @Test
 def testPgActiveUsersNamed(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let result = BlogTestSupport.withSeed(() -> {
-        discard Blog.registerUser({ name = "anna", email = "anna@example.com" });
+        discard Blog.runRegister(() -> Blog.registerUser({ name = "anna", email = "anna@example.com" }));
         (Blog.activeUsersNamed({ prefix = "a", limit = 10i64 }) |> List.map(row -> row#name), Blog.activeUsersNamed({ prefix = "", limit = 10i64 }) |> List.map(row -> row#name))
     });
     Assert.assertEq(expected = Ok((List#{"alice", "anna"}, List#{"alice", "anna", "bob", "carol"})), result)
@@ -51,3 +52,21 @@ def testPgRemoveUserInTx(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
         (removed, again, after)
     });
     Assert.assertEq(expected = Ok((true, false, (None, 0))), result)
+
+// ---- 制約が効いていること ----
+
+/// name の長さの CHECK は DB が弾く。制約を消す migration が入ればここで落ちる。
+/// 生成された insertUser を通しても止められないので、制約名付きの checkViolation として返る。
+@Test
+def testNameLengthIsEnforcedByDb(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let kind = BlogTestSupport.withDb(() ->
+        DbError.runWithKind(() -> UsersQueries.insertUser({ name = String.repeat(51, "a"), email = "long@example.com", role = "member" }))
+            |> Result.map(Option.map(row -> row#id)));
+    Assert.assertEq(expected = Ok(Err(DbErrorKind.CheckViolation("users_name_length"))), kind)
+
+/// NOT NULL は生成関数の引数の型が守るが、生 SQL で NULL を書けば列名付きの notNullViolation として返る。
+@Test
+def testNotNullIsEnforcedByDb(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let kind = BlogTestSupport.withDb(() ->
+        DbError.runWithKind(() -> Sql.execute("INSERT INTO users (name, email) VALUES (NULL, 'n@example.com')", Nil)));
+    Assert.assertEq(expected = Ok(Err(DbErrorKind.NotNullViolation("name"))), kind)

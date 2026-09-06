@@ -44,6 +44,19 @@ mod Row {
         Map.get(name, row#columns) |> Option.flatMap(index -> Vector.nth(index, row#cells))
 
     ///
+    /// 1 列の値を差し替えた行を返す。列が無ければ末尾に足す。
+    /// テストで「この列だけ壊れた行」を作るのに使う。
+    ///
+    pub def set(name: String, value: SqlValue.SqlValue, row: Row): Row =
+        match Map.get(name, row#columns) {
+            case Some(index) if index >= Vector.length(row#cells) => bug!("Row.set: column '${name}' has index ${index} but the row has ${Vector.length(row#cells)} cells")
+            case Some(index) => { columns = row#columns, cells = Vector.update(index, value, row#cells) }
+            case None =>
+                let index = Vector.length(row#cells);
+                { columns = Map.insert(name, index, row#columns), cells = Vector.append(row#cells, Vector#{value}) }
+        }
+
+    ///
     /// 列名を添字の順で返す。
     ///
     pub def columnNames(row: Row): List[String] =

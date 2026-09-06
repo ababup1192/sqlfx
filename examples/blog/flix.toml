@@ -7,6 +7,9 @@ authors     = ["abab <ababup1192@gmail.com>"]
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
+"com.zaxxer:HikariCP" = "5.1.0"
+# WhyNot: HikariCP は SLF4J で書くので、束縛が無いと最初の利用時に警告を標準エラーへ出し、Flix のテストが失敗扱いになる
+"org.slf4j:slf4j-nop" = "1.7.36"
 
 # sqlfx 本体は `make vendor` で ../../src/Db と ../../src/Q を src/sqlfx/ に写して使う。
 # WhyNot: flix.toml の [dependencies] は GitHub のリリースしか指せず、lib/ の .fpkg は flix.toml があると読まれない。

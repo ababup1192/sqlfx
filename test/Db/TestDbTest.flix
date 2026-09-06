@@ -1,6 +1,7 @@
 use SqlValue.SqlValue
 use Row.Row
 use DbError.DbFailure
+use DbError.DbErrorKind
 
 // DbTest: テストハンドラと、Sql / DbError の使い心地。失敗は DbError.runWithFailure で 1 層の Result にして比べる。
 
@@ -129,3 +130,15 @@ def testSelectClauseInRawSql(): Unit \ Assert =
     let (_, statements) = DbTest.runRecording(dbTestUserRows(), 0, () -> RawSql.runWithAllow(() -> DbError.runWithFailure(() ->
         Sql.fetchAs(userDecoder(), "SELECT ${Decoder.selectClause(userDecoder())} FROM users WHERE id = $1", List#{SqlValue.Int64(1i64)}))));
     Assert.assertEq(expected = List#{"SELECT id, name FROM users WHERE id = $1"}, List.map(statement -> statement#sql, statements))
+
+/// runFailingWrite は execute も executeReturning も kind で失敗させる。読み取りには関与しない。
+@Test
+def testRunFailingWrite(): Unit \ Assert =
+    let outcome = DbTest.runFailingWrite(DbErrorKind.CheckViolation("users_name_length"), () -> RawSql.runWithAllow(() -> {
+        let viaExecute = DbError.runWithKind(() -> Sql.execute("UPDATE users SET name = $1", List#{SqlValue.Str("x")}));
+        let viaReturning = DbError.runWithKind(() -> Sql.executeReturning("INSERT INTO users (name) VALUES ($1) RETURNING id", List#{SqlValue.Str("x")})) |> Result.map(List.length);
+        (viaExecute, viaReturning)
+    }));
+    Assert.assertEq(
+        expected = (Err(DbErrorKind.CheckViolation("users_name_length")), Err(DbErrorKind.CheckViolation("users_name_length"))),
+        outcome)

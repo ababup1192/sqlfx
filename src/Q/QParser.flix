@@ -158,11 +158,12 @@ mod QParser {
                 forM (
                     (name, afterName) <- expectIdent("slot name", cursorAtToken);
                     afterColon <- expectChar(':', afterName);
-                    (kindWord, afterKind) <- expectIdent("Pred / Order", afterColon);
+                    (kindWord, afterKind) <- expectIdent("Pred / Order / Changes", afterColon);
                     kind <- match kindWord {
                         case "Pred" => Ok(SlotKind.Pred)
                         case "Order" => Ok(SlotKind.Order)
-                        case _ => Err(ParseError.Unexpected(skipTrivia(afterColon)#pos, "Pred / Order"))
+                        case "Changes" => Ok(SlotKind.Changes)
+                        case _ => Err(ParseError.Unexpected(skipTrivia(afterColon)#pos, "Pred / Order / Changes"))
                     };
                     afterOpen <- expectChar('[', afterKind);
                     (table, afterTable) <- expectIdent("table name", afterOpen);

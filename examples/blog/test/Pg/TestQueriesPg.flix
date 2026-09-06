@@ -150,6 +150,25 @@ def testWritesThenRead(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
         expected = Ok((1, Some("robert"), 1, 0, None, Some(2i64), 1, List#{("Hello", 5), ("Second", 1)})),
         result |> Result.map(r -> (r#renamed, r#nameAfter, r#deleted, r#deletedAgain, r#gone, r#remaining, r#viewed, r#views)))
 
+/// editPost / clearEmail（Changes）: 触った列だけ変わり、他の列は残る。NULL 代入は Nullable 列に効く。
+///
+///   editPost(1, title = "Renamed") → 1 行、postWithAuthor(1) は title = Renamed / body はそのまま
+///   editPost(1, 何も無し) → 0 行
+///   clearEmail(alice) → 1 行、findUser は email = None
+@Test
+def testPartialUpdate(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let result = BlogTestSupport.withSeed(() -> {
+        let bodyBefore = PostsQueries.postWithAuthor(1i64) |> Option.map(row -> row#body);
+        let renamed = Blog.editPost(1i64, { title = Some("Renamed"), body = None, published = None });
+        let after = PostsQueries.postWithAuthor(1i64) |> Option.map(row -> (row#title, Some(row#body) == bodyBefore));
+        let untouched = Blog.editPost(1i64, { title = None, body = None, published = None });
+        let alice = BlogTestSupport.userIdOf("alice@example.com") |> Option.getWithDefault(0i64);
+        let cleared = Blog.clearEmail(alice);
+        let email = UsersQueries.findUser(alice) |> Option.map(row -> row#email);
+        (renamed, after, untouched, cleared, email)
+    });
+    Assert.assertEq(expected = Ok((1, Some(("Renamed", true)), 0, 1, Some(None))), result)
+
 /// insertPost（RETURNING）と deletePostsOfUser: 返った id で読め、消した後は無い。
 ///
 ///   insertPost(carol) → id 4 / postsByUsers([3]) は 1 件 / deletePostsOfUser(3) → 1 行 / その後 0 件

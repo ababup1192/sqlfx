@@ -19,13 +19,17 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "3"
+    pub def version(): String = "6"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
         case DuplicateResultColumn(String, String)
         /// (クエリ名, 名前) query 名・引数名・slot 名が Flix の予約語か、生成コードが内部で使う名前と衝突する
         case InvalidName(String, String)
+        /// (テーブル名, 制約名) 制約名から Flix の case 名が作れない（数字始まり、記号）
+        case InvalidConstraintName(String, String)
+        /// (テーブル名, case 名) 2 つの制約名が同じ case 名になる（`users_email_key` と `email_key` など）
+        case DuplicateConstraintCase(String, String)
     }
 
     ///
@@ -161,7 +165,7 @@ mod Codegen {
         let signature = List.append(paramDecls, slotDecls) |> List.join(", ");
         let paramRef = name -> if (useRecord) "args#${name}" else name;
         let baseParams = orderedNames
-            |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> "${SqlType.sqlValueCase(param#paramType)}(${paramRef(param#name)})") |> Option.getWithDefault(""))
+            |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> "${SqlType.wrapFunction(param#paramType)}(${paramRef(param#name)})") |> Option.getWithDefault(""))
             |> (values -> if (List.isEmpty(values)) "Nil" else "List#{${List.join(", ", values)}}");
         let decoder = "${queryDef#name}Decoder()";
         let (resultType, effects, statement) = match (queryDef#shape, resolved#writes) {
@@ -191,27 +195,53 @@ mod Codegen {
                     "        let params0 = ${baseParams};" :: renderSlotLets(queryDef),
                     List#{
                         "        let sql = ${renderSqlConcat(queryDef)};",
-                        "        let params = params${List.length(List.filter(slot -> slot#kind == SlotKind.Pred, queryDef#slots))};",
+                        "        let params = params${List.length(List.filter(slot -> consumesParams(slot#kind), queryDef#slots))};",
                         "        ${call}"
-                    });
+                    }) |> skipWhenNoChanges(queryDef);
         List.join("\n", List.append(doc :: header :: body, List#{""}))
+
+    ///
+    /// Changes の slot がどれか空なら、文を DB に出さずに 0 を返す形に本体を包む。
+    /// 空の SET 句は構文エラーで、`SET updated_at = now(), {changes}` のように固定の代入と並べても壊れないようにするため。
+    ///
+    def skipWhenNoChanges(queryDef: Query, body: List[String]): List[String] =
+        match List.filter(slot -> slot#kind == SlotKind.Changes, queryDef#slots) {
+            case Nil => body
+            case changesSlots =>
+                let condition = changesSlots |> List.map(slot -> "Fragment.isEmptyChanges(${slot#name})") |> List.join(" or ");
+                List.append(
+                    "        if (${condition}) 0 else {" :: List.map(line -> "    " + line, body),
+                    List#{"        }"})
+        }
+
+    ///
+    /// `$n` の値を積む slot か。Order は SQL の文字列だけを出す。
+    ///
+    def consumesParams(kind: SlotKind): Bool = match kind {
+        case SlotKind.Pred => true
+        case SlotKind.Order => false
+        case SlotKind.Changes => true
+    }
 
     def slotFlixType(kind: SlotKind, table: String): String = match kind {
         case SlotKind.Pred => "Fragment.Pred[${tableModuleOf(table)}.${tableModuleOf(table)}]"
         case SlotKind.Order => "Fragment.Order[${tableModuleOf(table)}.${tableModuleOf(table)}]"
+        case SlotKind.Changes => "Fragment.Changes[${tableModuleOf(table)}.${tableModuleOf(table)}]"
     }
 
     ///
-    /// Pred の slot ごとに `let (filterSql, params1) = Fragment.appendPred(filter, params0);`、Order は `let orderSql = ...`。
+    /// Pred の slot ごとに `let (filterSql, params1) = Fragment.appendPred(filter, params0);`、Changes は appendChanges、Order は `let orderSql = ...`。
     ///
     def renderSlotLets(queryDef: Query): List[String] =
         let (lines, _) = List.foldLeft((state, slot) -> {
-            let (acc, predCount) = state;
+            let (acc, paramSlotCount) = state;
             match slot#kind {
                 case SlotKind.Pred =>
-                    ("        let (${slot#name}Sql, params${predCount + 1}) = Fragment.appendPred(${slot#name}, params${predCount});" :: acc, predCount + 1)
+                    ("        let (${slot#name}Sql, params${paramSlotCount + 1}) = Fragment.appendPred(${slot#name}, params${paramSlotCount});" :: acc, paramSlotCount + 1)
+                case SlotKind.Changes =>
+                    ("        let (${slot#name}Sql, params${paramSlotCount + 1}) = Fragment.appendChanges(${slot#name}, params${paramSlotCount});" :: acc, paramSlotCount + 1)
                 case SlotKind.Order =>
-                    ("        let ${slot#name}Sql = Fragment.renderOrder(${slot#name});" :: acc, predCount)
+                    ("        let ${slot#name}Sql = Fragment.renderOrder(${slot#name});" :: acc, paramSlotCount)
             }
         }, (Nil, 0), queryDef#slots);
         List.reverse(lines)
@@ -245,13 +275,14 @@ mod Codegen {
     ///
     /// スキーマの全テーブルから、断片 DSL 用の Col 定義を 1 ファイルに。
     ///
-    pub def renderTables(schema: Schema): String =
-        let modules = Map.valuesOf(schema) |> List.map(renderTable);
-        List.join("\n", List#{
-            "// GENERATED by sqlfx gen v${version()} from migrations. Do not edit.",
-            "",
-            List.join("\n", modules)
-        })
+    pub def renderTables(schema: Schema): Result[CodegenError, String] =
+        Map.valuesOf(schema)
+            |> List.traverse(renderTable)
+            |> Result.map(modules -> List.join("\n", List#{
+                "// GENERATED by sqlfx gen v${version()} from migrations. Do not edit.",
+                "",
+                List.join("\n", modules)
+            }))
 
     ///
     /// DDL の NOT NULL を `Col` の第 3 型パラメータに写す。
@@ -261,14 +292,14 @@ mod Codegen {
 
     ///
     /// `mod UsersTable { pub enum UsersTable { case UsersTable }  pub def id(): Col[UsersTable, Int64, NotNull] = ... }`
-    /// 型が分からない列は出さない。
+    /// 型が分からない列は出さない。名前付きの制約があれば `Constraint` enum と `onConstraint` も出す。
     ///
-    def renderTable(table: Table): String =
+    def renderTable(table: Table): Result[CodegenError, String] =
         let moduleName = tableModuleOf(table#name);
         let cols = table#columns
             |> List.filterMap(column -> column#columnType |> Option.map(sqlType ->
-                "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}, ${nullabilityMarker(column#nullable)}] = Fragment.Col.Col(\"${column#name}\", ${SqlType.sqlValueCase(sqlType)})"));
-        List.join("\n", List#{
+                "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}, ${nullabilityMarker(column#nullable)}] = Fragment.Col.Col(${flixString(column#name)}, ${SqlType.wrapFunction(sqlType)})"));
+        renderConstraints(table) |> Result.map(constraints -> List.join("\n", List#{
             "///",
             "/// ${table#name} テーブル。enum は断片 DSL の型に付ける印、関数は列。",
             "///",
@@ -281,10 +312,86 @@ mod Codegen {
             "    }",
             "",
             List.join("\n", cols),
-            "",
+            constraints,
             "}",
             ""
-        })
+        }))
+
+    ///
+    /// `pub enum Constraint { case EmailKey ... }` と、翻訳しながら書き込む `onConstraint`、違反を DbErr に戻す `raiseConstraint`。
+    /// 制約が 1 つも無ければ何も出さない（Flix の enum は case が要る）。
+    ///
+    def renderConstraints(table: Table): Result[CodegenError, String] =
+        if (List.isEmpty(table#constraints))
+            Ok("")
+        else
+            forM (
+                entries <- List.traverse(constraint -> constraintCase(table#name, constraint#name) |> Result.map(caseName -> (caseName, constraint)), table#constraints);
+                _ <- checkDuplicateCases(table#name, List.map(fst, entries))
+            ) yield {
+                let cases = List.map(match (caseName, constraint) -> "        /// ${constraint#name} (${constraintKindWord(constraint#kind)})\n        case ${caseName}", entries);
+                let ofName = List.map(match (caseName, constraint) -> "        case ${flixString(constraint#name)} => Some(Constraint.${caseName})", entries);
+                let raises = List.map(match (caseName, constraint) -> "        case Constraint.${caseName} => ${raiseCall(constraint)}", entries);
+                List.join("\n", List#{
+                    "",
+                    "    ///",
+                    "    /// DDL の名前付き制約。違反の翻訳は `onConstraint` に渡す関数で書く。case が足りなければコンパイルエラー。",
+                    "    ///",
+                    "    pub enum Constraint with Eq, Order, ToString {",
+                    List.join("\n", cases),
+                    "    }",
+                    "",
+                    "    ///",
+                    "    /// このテーブルへの書き込みを、制約違反を `translate` で翻訳しながら実行する。",
+                    "    /// translate は thunk と同じ型の値を返すか、業務エラーのエフェクトを投げる。翻訳しない case は `raiseConstraint`。",
+                    "    /// enum に無い名前の違反と、制約違反以外の DbErr はそのまま上へ。Tx の外で呼ぶ（違反で abort した Tx に COMMIT を出さない）。",
+                    "    ///",
+                    "    pub def onConstraint(translate: Constraint -> a \\ ef1, thunk: Unit -> a \\ ef2): a \\ ef1 + ef2 + {TransientDbErr, DbErr} =",
+                    "        DbError.onConstraintWith(constraintOf, translate, thunk)",
+                    "",
+                    "    ///",
+                    "    /// 翻訳しない制約を元の DbErr に戻す。`onConstraint` に渡す関数の中で使う。",
+                    "    ///",
+                    "    pub def raiseConstraint(constraint: Constraint): a \\ DbErr = match constraint {",
+                    List.join("\n", raises),
+                    "    }",
+                    "",
+                    "    def constraintOf(name: String): Option[Constraint] = match name {",
+                    List.join("\n", ofName),
+                    "        case _ => None",
+                    "    }",
+                    ""
+                })
+            }
+
+    ///
+    /// `users_email_key` → `EmailKey`（テーブル名の接頭辞を落として PascalCase）。接頭辞が無ければ全体を PascalCase。
+    /// 英数字と `_` 以外を含む名前や、数字で始まる名前は case 名にできないのでエラー。
+    ///
+    pub def constraintCase(tableName: String, constraintName: String): Result[CodegenError, String] =
+        let prefix = tableName + "_";
+        let rest = if (String.startsWith(prefix = prefix, constraintName)) String.dropLeft(String.length(prefix), constraintName) else constraintName;
+        let caseName = pascalCase(if (String.isEmpty(rest)) constraintName else rest);
+        let valid = String.forAll(ch -> Char.isLetter(ch) or Char.isDigit(ch), caseName) and Option.exists(Char.isLetter, String.toList(caseName) |> List.head);
+        if (valid) Ok(caseName) else Err(CodegenError.InvalidConstraintName(tableName, constraintName))
+
+    def checkDuplicateCases(tableName: String, caseNames: List[String]): Result[CodegenError, Unit] =
+        match List.find(name -> List.count(other -> other == name, caseNames) > 1, caseNames) {
+            case Some(name) => Err(CodegenError.DuplicateConstraintCase(tableName, name))
+            case None => Ok(())
+        }
+
+    def constraintKindWord(kind: Schema.ConstraintKind): String = match kind {
+        case Schema.ConstraintKind.Unique => "unique"
+        case Schema.ConstraintKind.ForeignKey => "foreign key"
+        case Schema.ConstraintKind.Check => "check"
+    }
+
+    def raiseCall(constraint: Schema.Constraint): String = match constraint#kind {
+        case Schema.ConstraintKind.Unique => "DbErr.uniqueViolation(${flixString(constraint#name)})"
+        case Schema.ConstraintKind.ForeignKey => "DbErr.foreignKeyViolation(${flixString(constraint#name)})"
+        case Schema.ConstraintKind.Check => "DbErr.checkViolation(${flixString(constraint#name)})"
+    }
 
     // ---- 名前と文字列 ----
 

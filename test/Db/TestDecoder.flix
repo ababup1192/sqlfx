@@ -141,3 +141,54 @@ def testSelectExprAndDedupe(): Unit \ Assert =
     Assert.assertEq(
         expected = (List#{"count(*)::bigint AS total"}, Ok(3i64), List#{"id"}),
         (Decoder.selectList(count), Decoder.decodeRow(count, row), Decoder.selectList(twice)))
+
+/// attempt: 型違いは Err の値として残り行は落ちない。NULL と列が無いのは握らず、今まで通り落ちる。
+///
+///   views = "x"（型違い）→ Ok(Err(TypeMismatch)) / views = NULL → Err(UnexpectedNull) / 列無し → Err(MissingColumn)
+@Test
+def testRecoverKeepsTypeMismatchAsValue(): Unit \ Assert =
+    let broken = Row.makeRows(List#{"views"}, List#{List#{SqlValue.Str("x")}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let nulled = Row.makeRows(List#{"views"}, List#{List#{SqlValue.Null}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let missing = Row.makeRows(List#{"other"}, List#{List#{SqlValue.Int32(1)}}) |> List.head |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let decoder = Decoder.attempt(Decoder.int32("views"));
+    Assert.assertEq(
+        expected = (Ok(Err(DecodeError.TypeMismatch("views", "Int32", "Str"))), Err(DecodeError.UnexpectedNull("views")), Err(DecodeError.MissingColumn("views"))),
+        (Decoder.decodeRow(decoder, broken), Decoder.decodeRow(decoder, nulled), Decoder.decodeRow(decoder, missing)))
+
+// ---- 意味を持つ型 ----
+
+/// timestamp / date / uuid は意味を持つ型で返る。json は parse し、壊れていれば InvalidJson。jsonAs は FromJson の型へ。
+///
+///   created_at = 2026-09-06T01:00:00Z / born = 2026-09-06 / meta = {"n": 1} / broken = "{"
+@Test
+def testSemanticTypes(): Unit \ Assert =
+    let row = Row.makeRows(
+        List#{"created_at", "born", "key", "meta", "broken"},
+        List#{List#{SqlValue.Timestamp(1788656400000000i64), SqlValue.Date(20702), SqlValue.Uuid("550e8400-e29b-41d4-a716-446655440000"), SqlValue.Json("{\"n\": 1}"), SqlValue.Json("{")}})
+        |> List.head
+        |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    Assert.assertEq(
+        expected = (Ok("2026-09-06T01:00:00Z"), Ok("2026-09-06"), Ok("550e8400-e29b-41d4-a716-446655440000"), Ok(Ok(1)), true, Ok("{\"n\":1}")),
+        (Decoder.decodeRow(Decoder.timestamp("created_at"), row) |> Result.map(Timestamp.toIso8601),
+         Decoder.decodeRow(Decoder.date("born"), row) |> Result.map(Date.toIso8601),
+         Decoder.decodeRow(Decoder.uuid("key"), row) |> Result.map(Uuid.toText),
+         Decoder.decodeRow(Decoder.json("meta"), row) |> Result.map(j -> Util.Json.FromJson.decodeAtKey("n", j) |> Result.map(n -> { let m: Int32 = n; m })),
+         Decoder.decodeRow(Decoder.json("broken"), row) |> Result.mapErr(Decoder.errorColumn) == Err("broken"),
+         Decoder.decodeRow(Decoder.json("meta"), row) |> Result.map(Util.Json.toCompactString)))
+
+/// jsonAs は FromJson のある型へ。形が合わなければ InvalidJson（列名付き）。
+///
+///   meta = {"n": 1} → Map[String, Int32] / list = [1, 2] → Vector[Int32] / meta を Vector で読むと InvalidJson
+@Test
+def testJsonAs(): Unit \ Assert =
+    let row = Row.makeRows(
+        List#{"meta", "list"},
+        List#{List#{SqlValue.Json("{\"n\": 1}"), SqlValue.Json("[1, 2]")}})
+        |> List.head
+        |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let asMap: Result[DecodeError, Map[String, Int32]] = Decoder.decodeRow(Decoder.jsonAs("meta"), row);
+    let asVector: Result[DecodeError, Vector[Int32]] = Decoder.decodeRow(Decoder.jsonAs("list"), row);
+    let mismatch: Result[DecodeError, Vector[Int32]] = Decoder.decodeRow(Decoder.jsonAs("meta"), row);
+    Assert.assertEq(
+        expected = (Ok(Map#{"n" => 1}), Ok(Vector#{1, 2}), Err("meta")),
+        (asMap, asVector, mismatch |> Result.mapErr(Decoder.errorColumn)))

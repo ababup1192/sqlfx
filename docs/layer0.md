@@ -33,13 +33,17 @@ Decoder（純粋）  Row -> Result[DecodeError, a]
 | `src/Db/SqlValue.flix` | `enum SqlValue`。行き（プレースホルダ）と帰り（セル）の両方 |
 | `src/Db/Row.flix` | `Row` / `ColumnIndex` / `Statement` |
 | `src/Db/Decoder.flix` | `Decoder[a]` と組み合わせ関数 |
+| `src/Time/*.flix` | `Timestamp`（UTC の瞬間）/ `Date`（暦日）/ `Zone` + `eff TimeZone` / `Format` トークン / `TimeTest.runFrozen`。DB の層に依存しない |
+| `src/Uuid/Uuid.flix` | `Uuid`。`fromString` は `Option`、`random` は `NonDet` |
 | `src/Db/Sql.flix` | `eff SqlRead` / `eff SqlWrite` |
 | `src/Db/DbError.flix` | `eff TransientDbErr` / `eff DbErr` / `enum DbErrorKind` / `enum DbFailure` |
 | `src/Db/Retry.flix` | `Retry.withRetry` |
 | `src/Db/Tx.flix` | `Tx.withTx` |
 | `src/Db/Jdbc/SqlState.flix` | `mod SqlState`: sqlstate → `DbErrorKind`（純粋） |
 | `src/Db/Jdbc/JdbcConvert.flix` | `mod JdbcConvert`: `SqlValue` ⇔ JDBC の変換（Java 型はここに閉じる） |
-| `src/Db/Jdbc/Jdbc.flix` | `mod Jdbc`: `runWithConnection` |
+| `src/Db/Jdbc/Jdbc.flix` | `mod Jdbc`: `runWithConnection` / `withConnection`（1 回だけ開く） |
+| `src/Db/Jdbc/Pool.flix` | `mod Pool`: HikariCP を包んだ接続プール。`open` / `close` / `withConnection`（借りて返す） |
+| `src/Db/Migrate.flix` | `mod Migrate`: migrations/*.sql を DB に当てる。`apply` / `check` / `status`、記録は `sqlfx_migrations` |
 | `src/Db/Test/DbTest.flix` | `runWithRows` / `runRecording` / `runLogging`（1 モジュール 1 宣言なので 1 ファイル） |
 
 ## 値: `SqlValue`
@@ -97,8 +101,12 @@ pub enum DecodeError with Eq, ToString {
     case MissingColumn(String)               // 列が結果セットに無い
     case TypeMismatch(String, String, String) // 列名, 期待した型, 実際の型
     case UnexpectedNull(String)
+    case InvalidJson(String, String)         // 列名, 理由。TEXT 列を Json と宣言したときに出る
 }
 ```
+
+`timestamp` / `date` / `uuid` は `Timestamp.Timestamp` / `Date.Date` / `Uuid.Uuid` で返し、`json` は `Util.Json.Json` に parse する（`jsonAs` は `FromJson` の型へ、`jsonText` は素の文字列）。
+`SqlValue` の中身は変えず、`SqlValue.ofTimestamp` 等で包む。生成コードの型と `Fragment.Col` も同じ型を使う。
 
 組み合わせ関数（全部純粋。`Decoder` モジュール）:
 
@@ -143,6 +151,8 @@ pub eff TransientDbErr {
 pub eff DbErr {
     def uniqueViolation(constraint: String): Void
     def foreignKeyViolation(constraint: String): Void
+    def checkViolation(constraint: String): Void
+    def notNullViolation(column: String): Void
     def schemaMismatch(detail: String): Void
     def decodeError(column: String, detail: String): Void
     def retryExhausted(last: String): Void
@@ -163,6 +173,8 @@ pub enum DbErrorKind with Eq, Order, ToString {
     case ConnectionLost(String)       // 08xxx
     case UniqueViolation(String)      // 23505（制約名は pgjdbc の ServerErrorMessage から）
     case ForeignKeyViolation(String)  // 23503
+    case CheckViolation(String)       // 23514
+    case NotNullViolation(String)     // 23502（列名。pgjdbc の getColumn）
     case SchemaMismatch(String)       // 42P01, 42703, 42883, 42804
     case DecodeError(String, String)  // 結果セットの列が読めない
     case RetryExhausted(String)       // withRetry の枯渇

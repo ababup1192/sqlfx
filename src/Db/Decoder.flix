@@ -1,5 +1,7 @@
 mod Decoder {
 
+    use Util.Json.FromJson.FromJson
+
     ///
     /// 1 行を型付きの値に変える純粋関数と、その値を読むのに要る SELECT 句の断片の一覧（逆順で持つ）。
     /// 列名 → 添字の解決は行の `columns` で行う。断片の一覧は `selectClause` で SELECT 句を組むのに使う。
@@ -41,6 +43,8 @@ mod Decoder {
         case TypeMismatch(String, String, String)
         /// NULL を許さない列が NULL だった
         case UnexpectedNull(String)
+        /// (列名, 理由) JSON として読めない。`json` 型の列では起きず、TEXT 列を Json と宣言したときに出る
+        case InvalidJson(String, String)
     }
 
     ///
@@ -50,6 +54,7 @@ mod Decoder {
         case DecodeError.MissingColumn(column) => "column '${column}' is missing"
         case DecodeError.TypeMismatch(column, expected, actual) => "column '${column}' is ${actual}, expected ${expected}"
         case DecodeError.UnexpectedNull(column) => "column '${column}' is NULL"
+        case DecodeError.InvalidJson(column, reason) => "column '${column}' is not JSON: ${reason}"
     }
 
     ///
@@ -58,6 +63,7 @@ mod Decoder {
     pub def errorColumn(error: DecodeError): String = match error {
         case DecodeError.MissingColumn(column) => column
         case DecodeError.TypeMismatch(column, _, _) => column
+        case DecodeError.InvalidJson(column, _) => column
         case DecodeError.UnexpectedNull(column) => column
     }
 
@@ -144,6 +150,26 @@ mod Decoder {
         })
 
     ///
+    /// 壊れた値を行ごと落とさず、失敗を値として残す。内側が TypeMismatch で失敗したら Err、成功したら Ok。列はそのまま。
+    /// NULL は `opt` の役目、列が無い（MissingColumn）のは SELECT 句とデコーダのずれなので握らず落とす。
+    ///
+    /// WhyNot: Option にしないのは、None にした事実がどこにも残らず、汚染に気付く経路が消えるから。
+    /// 件数の集計やログは、Err を持った利用者が組む。
+    ///
+    pub def attempt(decoder: Decoder[a]): Decoder[Result[DecodeError, a]] =
+        let Decoder.Decoder(reversed, decode) = decoder;
+        Decoder.Decoder(reversed, row -> match decode(row) {
+            case Err(error) if isTypeMismatch(error) => Ok(Err(error))
+            case Err(error) => Err(error)
+            case Ok(value) => Ok(Ok(value))
+        })
+
+    def isTypeMismatch(error: DecodeError): Bool = match error {
+        case DecodeError.TypeMismatch(_, _, _) => true
+        case _ => false
+    }
+
+    ///
     /// 型付きの列デコーダを組む。`extract` が None を返したら TypeMismatch、NULL なら UnexpectedNull。
     ///
     pub def typed(column: { name = String, expected = String }, extract: SqlValue.SqlValue -> Option[a]): Decoder[a] =
@@ -162,10 +188,28 @@ mod Decoder {
     pub def decimal(name: String): Decoder[BigDecimal] = typed({ name = name, expected = "Decimal" }, SqlValue.asDecimal)
     pub def str(name: String): Decoder[String] = typed({ name = name, expected = "Str" }, SqlValue.asStr)
     pub def bytes(name: String): Decoder[Vector[Int8]] = typed({ name = name, expected = "Bytes" }, SqlValue.asBytes)
-    pub def timestamp(name: String): Decoder[Int64] = typed({ name = name, expected = "Timestamp" }, SqlValue.asTimestamp)
-    pub def date(name: String): Decoder[Int32] = typed({ name = name, expected = "Date" }, SqlValue.asDate)
-    pub def uuid(name: String): Decoder[String] = typed({ name = name, expected = "Uuid" }, SqlValue.asUuid)
-    pub def json(name: String): Decoder[String] = typed({ name = name, expected = "Json" }, SqlValue.asJson)
+    pub def timestamp(name: String): Decoder[Timestamp.Timestamp] = typed({ name = name, expected = "Timestamp" }, value -> SqlValue.asTimestamp(value) |> Option.map(Timestamp.fromEpochMicros))
+    pub def date(name: String): Decoder[Date.Date] = typed({ name = name, expected = "Date" }, value -> SqlValue.asDate(value) |> Option.map(Date.fromEpochDay))
+    pub def uuid(name: String): Decoder[Uuid.Uuid] = typed({ name = name, expected = "Uuid" }, value -> SqlValue.asUuid(value) |> Option.flatMap(Uuid.fromString))
+
+    ///
+    /// JSON の素の文字列。
+    ///
+    pub def jsonText(name: String): Decoder[String] = typed({ name = name, expected = "Json" }, SqlValue.asJson)
+
+    ///
+    /// 標準ライブラリの Json に parse する。読めなければ InvalidJson。
+    ///
+    pub def json(name: String): Decoder[Util.Json.Json] =
+        let Decoder.Decoder(columns, decode) = jsonText(name);
+        Decoder.Decoder(columns, row -> decode(row) |> Result.flatMap(text -> Util.Json.parse(text) |> Result.mapErr(e -> DecodeError.InvalidJson(name, "${e}"))))
+
+    ///
+    /// JSON を FromJson のある型に。形が合わなければ InvalidJson。
+    ///
+    pub def jsonAs(name: String): Decoder[a] with FromJson[a] =
+        let Decoder.Decoder(columns, decode) = json(name);
+        Decoder.Decoder(columns, row -> decode(row) |> Result.flatMap(j -> FromJson.fromJson(j) |> Result.mapErr(e -> DecodeError.InvalidJson(name, "${e}"))))
     pub def int64Array(name: String): Decoder[List[Int64]] = typed({ name = name, expected = "Int64Array" }, SqlValue.asInt64Array)
     pub def strArray(name: String): Decoder[List[String]] = typed({ name = name, expected = "StrArray" }, SqlValue.asStrArray)
 

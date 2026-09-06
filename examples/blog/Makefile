@@ -1,4 +1,4 @@
-.PHONY: vendor gen gen-check check test test-unit test-pg db-up db-down
+.PHONY: vendor gen gen-check migrate migrate-check migrate-status migrate-new check test test-unit test-pg db-up db-down
 
 FLIX = ../../bin/flix
 COMPOSE = docker compose -f ../../docker-compose.yml
@@ -6,7 +6,7 @@ PG_ENV = SQLFX_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_TEST_USER=f
 
 # sqlfx 本体を src/sqlfx/ に写す（flix.toml がローカル依存を指せないため）
 vendor:
-	rm -rf src/sqlfx && mkdir -p src/sqlfx && cp -R ../../src/Db ../../src/Q src/sqlfx/
+	rm -rf src/sqlfx && mkdir -p src/sqlfx && cp -R ../../src/Db ../../src/Q ../../src/Time ../../src/Uuid src/sqlfx/
 
 # migrations と queries/*.q から src/Gen/ を作り直す（生成器は本体の main）
 gen:
@@ -15,6 +15,21 @@ gen:
 # 生成物が最新か（書かない。本体の make test-unit でも同じ検査が走る）
 gen-check:
 	cd ../.. && bin/flix run -- gen --check examples/blog/migrations examples/blog/queries examples/blog/src/Gen
+
+# migrations/ を docker の PG に当てる（db-up の後で）。接続先は PG_ENV と同じ
+MIGRATE_ENV = SQLFX_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_USER=flix SQLFX_PASSWORD=flix
+
+migrate:
+	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate examples/blog/migrations
+
+migrate-check:
+	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate --check examples/blog/migrations
+
+migrate-status:
+	cd ../.. && $(MIGRATE_ENV) bin/flix run -- migrate --status examples/blog/migrations
+
+migrate-new:   # make migrate-new NAME=add_note
+	cd ../.. && bin/flix run -- migrate new examples/blog/migrations $(NAME)
 
 check: vendor
 	$(FLIX) check

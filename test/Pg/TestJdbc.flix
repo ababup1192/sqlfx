@@ -165,6 +165,29 @@ def testPgMoreTypesRoundTrip(): Unit \ {Assert, IO} =
     });
     Assert.assertEq(expected = Ok(Some(inserted)), result)
 
+/// 意味を持つ型を実 PG と往復する。書くときは SqlValue.ofTimestamp 等で包み、読むときは Decoder.timestamp 等で意味を持つ型に戻る。
+///
+///   TIMESTAMPTZ '2026-09-06T01:00:00Z' / DATE '2026-09-06' / UUID / JSONB '{"n": 1}' → 同じ値で返る
+@Test
+def testPgSemanticTypesRoundTrip(): Unit \ {Assert, IO} =
+    let at = Timestamp.at("2026-09-06T01:00:00.123456Z");
+    let day = Date.at("2026-09-06");
+    let key = Uuid.fromString("550e8400-e29b-41d4-a716-446655440000") |> Option.getWithDefault(Uuid.Uuid(""));
+    let meta = Util.Json.Json.JObject(Map#{"n" => Util.Json.Json.JNumber(1ff)});
+    let decoder = forA (
+        t <- Decoder.timestamp("t");
+        d <- Decoder.date("d");
+        u <- Decoder.uuid("u");
+        j <- Decoder.jsonAs("j")
+    ) yield (t, d, u, (j: Map[String, Int32]));
+    let result = withPg(() -> {
+        discard Sql.execute("DROP TABLE IF EXISTS sqlfx_test_semantic", Nil);
+        discard Sql.execute("CREATE TABLE sqlfx_test_semantic (t TIMESTAMPTZ, d DATE, u UUID, j JSONB)", Nil);
+        discard Sql.execute("INSERT INTO sqlfx_test_semantic VALUES ($1, $2, $3, $4)", List#{SqlValue.ofTimestamp(at), SqlValue.ofDate(day), SqlValue.ofUuid(key), SqlValue.ofJson(meta)});
+        Sql.fetchOneAs(decoder, "SELECT t, d, u, j FROM sqlfx_test_semantic", Nil)
+    });
+    Assert.assertEq(expected = Ok(Some((at, day, key, Map#{"n" => 1}))), result)
+
 /// 実 PG でも Decoder の型不一致は DbErr.decodeError になる（BIGSERIAL を Int32 で読む）。
 @Test
 def testPgDecodeErrorIsDbErr(): Unit \ {Assert, IO} =

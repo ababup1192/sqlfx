@@ -148,12 +148,17 @@ mod Jdbc {
         let message: String = e.getMessage();
         let safeState = if (Object.isNull(state)) "" else state;
         let safeMessage = if (Object.isNull(message)) "" else message;
-        DbError.raise(SqlState.classifyWith({ sqlState = safeState, message = safeMessage, constraint = serverConstraint(e) }))
+        DbError.raise(SqlState.classifyWith({
+            sqlState = safeState,
+            message = safeMessage,
+            constraint = serverField(server -> server.getConstraint(), e),
+            column = serverField(server -> server.getColumn(), e)
+        }))
 
     ///
-    /// pgjdbc の例外ならサーバが返した制約名を取り出す。それ以外の SQLException や、制約の無いエラーは None。
+    /// pgjdbc の例外ならサーバが返したエラーの一部（制約名、列名）を取り出す。それ以外の SQLException や、その項目が無いエラーは None。
     ///
-    def serverConstraint(e: SQLException): Option[String] \ IO =
+    def serverField(pick: ServerErrorMessage -> String \ IO, e: SQLException): Option[String] \ IO =
         let className: String = e.getClass().getName();
         if (className != "org.postgresql.util.PSQLException")
             None
@@ -162,8 +167,8 @@ mod Jdbc {
             let server: ServerErrorMessage = psql.getServerErrorMessage();
             if (Object.isNull(server)) None
             else {
-                let constraint: String = server.getConstraint();
-                if (Object.isNull(constraint)) None else Some(constraint)
+                let value: String = pick(server);
+                if (Object.isNull(value)) None else Some(value)
             }
         }
 

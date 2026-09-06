@@ -16,6 +16,10 @@ pub eff DbErr {
     def uniqueViolation(constraint: String): Void
     /// 外部キー制約違反（制約名）
     def foreignKeyViolation(constraint: String): Void
+    /// CHECK 制約違反（制約名）
+    def checkViolation(constraint: String): Void
+    /// NOT NULL 違反（列名）。生成された関数の引数の型が守るので、生 SQL か UPDATE で NULL を書いたときに出る
+    def notNullViolation(column: String): Void
     /// テーブルや列が無い = デプロイミス
     def schemaMismatch(detail: String): Void
     /// 結果セットの列が期待した型で読めない
@@ -44,6 +48,8 @@ mod DbError {
         case ConnectionLost(String)
         case UniqueViolation(String)
         case ForeignKeyViolation(String)
+        case CheckViolation(String)
+        case NotNullViolation(String)
         case SchemaMismatch(String)
         case DecodeError(String, String)
         case RetryExhausted(String)
@@ -69,6 +75,8 @@ mod DbError {
         case DbErrorKind.ConnectionLost(msg) => TransientDbErr.connectionLost(msg)
         case DbErrorKind.UniqueViolation(constraint) => DbErr.uniqueViolation(constraint)
         case DbErrorKind.ForeignKeyViolation(constraint) => DbErr.foreignKeyViolation(constraint)
+        case DbErrorKind.CheckViolation(constraint) => DbErr.checkViolation(constraint)
+        case DbErrorKind.NotNullViolation(column) => DbErr.notNullViolation(column)
         case DbErrorKind.SchemaMismatch(detail) => DbErr.schemaMismatch(detail)
         case DbErrorKind.DecodeError(column, detail) => DbErr.decodeError(column, detail)
         case DbErrorKind.RetryExhausted(last) => DbErr.retryExhausted(last)
@@ -88,10 +96,45 @@ mod DbError {
         } with handler DbErr {
             def uniqueViolation(constraint, _resume) = Err(DbErrorKind.UniqueViolation(constraint))
             def foreignKeyViolation(constraint, _resume) = Err(DbErrorKind.ForeignKeyViolation(constraint))
+            def checkViolation(constraint, _resume) = Err(DbErrorKind.CheckViolation(constraint))
+            def notNullViolation(column, _resume) = Err(DbErrorKind.NotNullViolation(column))
             def schemaMismatch(detail, _resume) = Err(DbErrorKind.SchemaMismatch(detail))
             def decodeError(column, detail, _resume) = Err(DbErrorKind.DecodeError(column, detail))
             def retryExhausted(last, _resume) = Err(DbErrorKind.RetryExhausted(last))
             def other(detail, _resume) = Err(DbErrorKind.Other(detail))
+        }
+
+    ///
+    /// 制約違反の制約名。UNIQUE / FK / CHECK だけ。notNullViolation は列名なので None。
+    ///
+    pub def constraintName(kind: DbErrorKind): Option[String] = match kind {
+        case DbErrorKind.UniqueViolation(constraint) => Some(constraint)
+        case DbErrorKind.ForeignKeyViolation(constraint) => Some(constraint)
+        case DbErrorKind.CheckViolation(constraint) => Some(constraint)
+        case DbErrorKind.NotNullViolation(_) => None
+        case DbErrorKind.Deadlock => None
+        case DbErrorKind.Timeout(_) => None
+        case DbErrorKind.ConnectionLost(_) => None
+        case DbErrorKind.SchemaMismatch(_) => None
+        case DbErrorKind.DecodeError(_, _) => None
+        case DbErrorKind.RetryExhausted(_) => None
+        case DbErrorKind.Other(_) => None
+    }
+
+    ///
+    /// 制約違反を翻訳しながら thunk を走らせる。生成された `XxxTable.onConstraint` の土台。
+    /// translate は thunk と同じ型の値を返すか、業務エラーのエフェクトを投げる。
+    /// `constraintOf` が None を返す名前（DDL に無い制約）と、制約違反以外の DbErr は raise でそのまま上へ。
+    ///
+    /// WhyNot: `case _ => None` を書かないのは、DbErrorKind に制約違反の case を足したとき、ここを書き忘れると翻訳が黙って抜けるから。
+    ///
+    pub def onConstraintWith(constraintOf: String -> Option[c], translate: c -> a \ ef1, thunk: Unit -> a \ ef2): a \ ef1 + ef2 + {TransientDbErr, DbErr} =
+        match runWithKind(thunk) {
+            case Ok(value) => value
+            case Err(kind) => match constraintName(kind) |> Option.flatMap(constraintOf) {
+                case Some(constraint) => translate(constraint)
+                case None => raise(kind)
+            }
         }
 
     ///
@@ -120,6 +163,8 @@ mod DbError {
         case DbErrorKind.ConnectionLost(msg) => "connectionLost ${msg}"
         case DbErrorKind.UniqueViolation(constraint) => "uniqueViolation ${constraint}"
         case DbErrorKind.ForeignKeyViolation(constraint) => "foreignKeyViolation ${constraint}"
+        case DbErrorKind.CheckViolation(constraint) => "checkViolation ${constraint}"
+        case DbErrorKind.NotNullViolation(column) => "notNullViolation ${column}"
         case DbErrorKind.SchemaMismatch(detail) => "schemaMismatch ${detail}"
         case DbErrorKind.DecodeError(column, detail) => "${column}: ${detail}"
         case DbErrorKind.RetryExhausted(last) => "retryExhausted ${last}"
@@ -158,6 +203,8 @@ mod DbErr {
         } with handler DbErr {
             def uniqueViolation(constraint, _resume) = Err(DbError.describe(DbError.DbErrorKind.UniqueViolation(constraint)))
             def foreignKeyViolation(constraint, _resume) = Err(DbError.describe(DbError.DbErrorKind.ForeignKeyViolation(constraint)))
+            def checkViolation(constraint, _resume) = Err(DbError.describe(DbError.DbErrorKind.CheckViolation(constraint)))
+            def notNullViolation(column, _resume) = Err(DbError.describe(DbError.DbErrorKind.NotNullViolation(column)))
             def schemaMismatch(detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.SchemaMismatch(detail)))
             def decodeError(column, detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.DecodeError(column, detail)))
             def retryExhausted(last, _resume) = Err(DbError.describe(DbError.DbErrorKind.RetryExhausted(last)))
