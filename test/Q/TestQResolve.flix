@@ -60,6 +60,16 @@ def testResolveWrites(): Unit \ Assert =
         |> Result.map(List.map(resolved -> resolved#writes));
     Assert.assertEq(expected = Ok(List#{false, true, true}), writes)
 
+/// UPSERT: ON CONFLICT DO UPDATE SET の UPDATE をテーブルの導入語と読まない。RETURNING は INSERT 先の表で解決する。
+@Test
+def testResolveUpsert(): Unit \ Assert =
+    let source = "query u(name: String, email: String) -> one { INSERT INTO users (name, email) VALUES (:name, :email) ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name RETURNING id, name }";
+    let columns = QParser.parseFile(source)
+        |> Result.mapErr(ToString.toString)
+        |> Result.flatMap(queries -> Result.traverse(QResolve.resolve(blogSchema()), queries) |> Result.mapErr(ToString.toString))
+        |> Result.map(List.flatMap(resolved -> List.map(column -> (column#name, column#nullable), resolved#columns)));
+    Assert.assertEq(expected = Ok(List#{("id", false), ("name", false)}), columns)
+
 /// 解決の失敗: 無いテーブル / 無い列 / 曖昧な列 / 型の無い式 / one に RETURNING 無しの UPDATE / exec に RETURNING / keyed が結果に無い / slot のテーブルが FROM に無い
 /// / Changes が exec 以外 / Changes のテーブルが UPDATE の対象でない（FROM にはある）。
 @Test

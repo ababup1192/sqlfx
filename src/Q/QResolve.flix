@@ -178,8 +178,11 @@ mod QResolve {
             case _ => ("", words)
         }
 
+    ///
+    /// `UPDATE` は文の先頭だけ。`ON CONFLICT DO UPDATE SET` の UPDATE は次が SET で、テーブルではない。
+    ///
     def isTableIntroducer(upper: String, previous: String): Bool =
-        upper == "FROM" or upper == "JOIN" or upper == "UPDATE" or (upper == "INTO" and previous == "INSERT")
+        upper == "FROM" or upper == "JOIN" or (upper == "UPDATE" and previous == "") or (upper == "INTO" and previous == "INSERT")
 
     ///
     /// 直前がテーブル（label 込み）を読み終えた所なら、カンマは次のテーブル。

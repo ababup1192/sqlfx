@@ -7,7 +7,7 @@ mod UsersQueries {
     ///
     /// 生成元 users.q のハッシュ。テストで .q の現物と照合する。
     ///
-    pub def sourceHash(): Int32 = -1832551137
+    pub def sourceHash(): Int32 = -1515793838
 
     ///
     /// findUser の 1 行。
@@ -92,6 +92,32 @@ mod UsersQueries {
         let sql = "INSERT INTO users (name, email, role) VALUES ($1, $2, $3) RETURNING id";
         let params = List#{SqlValue.Str(args#name), SqlValue.Str(args#email), SqlValue.Str(args#role)};
         RawSql.runWithAllow(() -> Sql.executeReturningOneAs(insertUserDecoder(), sql, params))
+
+    ///
+    /// upsertUser の 1 行。
+    ///
+    pub type alias UpsertUserRow = { id = Int64 }
+
+    def upsertUserDecoder(): Decoder[UpsertUserRow] =
+        forA (
+            id <- Decoder.int64("id")
+        ) yield { id = id }
+
+    ///
+    /// upsertUser: INSERT INTO users (name, email, role) VALUES ($1, $2, $3) ON CONFLICT ON CONSTRAINT users_email_key DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role RETURNING id
+    ///
+    pub def upsertUser(args: { name = String, email = String, role = String }): Option[UpsertUserRow] \ DbWrite =
+        let sql = "INSERT INTO users (name, email, role) VALUES ($1, $2, $3)\n    ON CONFLICT ON CONSTRAINT users_email_key DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role\n    RETURNING id";
+        let params = List#{SqlValue.Str(args#name), SqlValue.Str(args#email), SqlValue.Str(args#role)};
+        RawSql.runWithAllow(() -> Sql.executeReturningOneAs(upsertUserDecoder(), sql, params))
+
+    ///
+    /// insertUserIfAbsent: INSERT INTO users (name, email, role) VALUES ($1, $2, $3) ON CONFLICT (email) DO NOTHING
+    ///
+    pub def insertUserIfAbsent(args: { name = String, email = String, role = String }): Int32 \ DbWrite =
+        let sql = "INSERT INTO users (name, email, role) VALUES ($1, $2, $3)\n    ON CONFLICT (email) DO NOTHING";
+        let params = List#{SqlValue.Str(args#name), SqlValue.Str(args#email), SqlValue.Str(args#role)};
+        RawSql.runWithAllow(() -> Sql.execute(sql, params))
 
     ///
     /// renameUser: UPDATE users SET name = $1 WHERE id = $2
