@@ -138,6 +138,29 @@ def testRenderChangesSlot(): Unit \ Assert =
         "        }"
     }), body)
 
+/// 意味を持つ型: Timestamp / Json の引数は SqlValue.ofTimestamp / ofJson で包み、行型と Col も同じ型になる。
+///
+///   query touch(id: Int64, at: Timestamp, meta: Json) -> one { UPDATE posts SET touched_at = :at, meta = :meta WHERE id = :id RETURNING touched_at, meta }
+@Test
+def testRenderSemanticTypes(): Unit \ Assert =
+    let source = "query touch(id: Int64, at: Timestamp, meta: Json) -> one { UPDATE posts SET touched_at = :at, meta = :meta WHERE id = :id RETURNING touched_at, meta }";
+    let schema = DdlParser.apply("CREATE TABLE posts (id BIGINT PRIMARY KEY, touched_at TIMESTAMPTZ NOT NULL, meta JSONB)", Schema.empty()) |> Result.map(fst) |> Result.getWithDefault(Schema.empty());
+    let queries = QParser.parseFile(source)
+        |> Result.mapErr(ToString.toString)
+        |> Result.flatMap(qs -> Result.traverse(QResolve.resolve(schema), qs) |> Result.mapErr(ToString.toString))
+        |> Result.flatMap(resolved -> Codegen.renderQueries({ fileName = "touch.q", source = source }, resolved) |> Result.mapErr(ToString.toString))
+        |> Result.map(code -> String.splitOn(substr = "\n", code) |> List.filter(line -> String.contains(substr = "TouchRow =", line) or String.contains(substr = "params =", line) or String.startsWith(prefix = "    pub def touch(", line)));
+    let tables = Codegen.renderTables(schema)
+        |> Result.mapErr(ToString.toString)
+        |> Result.map(code -> String.splitOn(substr = "\n", code) |> List.filter(line -> String.contains(substr = "def touchedAt", line)));
+    Assert.assertEq(expected = (Ok(List#{
+        "    pub type alias TouchRow = { touchedAt = Timestamp.Timestamp, meta = Option[Util.Json.Json] }",
+        "    pub def touch(args: { id = Int64, at = Timestamp.Timestamp, meta = Util.Json.Json }): Option[TouchRow] \\ DbWrite =",
+        "        let params = List#{SqlValue.ofTimestamp(args#at), SqlValue.ofJson(args#meta), SqlValue.Int64(args#id)};"
+    }), Ok(List#{
+        "    pub def touchedAt(): Fragment.Col[PostsTable, Timestamp.Timestamp, Fragment.NotNull] = Fragment.Col.Col(\"touched_at\", SqlValue.ofTimestamp)"
+    })), (queries, tables))
+
 /// 制約名 → case 名。テーブル名の接頭辞を落として PascalCase。数字始まりや記号はエラー、2 つの名前が同じ case になればエラー。
 ///
 ///   users_email_key → EmailKey / email_key → EmailKey（接頭辞無し）/ users_1_check → エラー / users_email_key + email_key → 重複

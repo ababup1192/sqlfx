@@ -175,3 +175,20 @@ def testSemanticTypes(): Unit \ Assert =
          Decoder.decodeRow(Decoder.json("meta"), row) |> Result.map(j -> Util.Json.FromJson.decodeAtKey("n", j) |> Result.map(n -> { let m: Int32 = n; m })),
          Decoder.decodeRow(Decoder.json("broken"), row) |> Result.mapErr(Decoder.errorColumn) == Err("broken"),
          Decoder.decodeRow(Decoder.json("meta"), row) |> Result.map(Util.Json.toCompactString)))
+
+/// jsonAs は FromJson のある型へ。形が合わなければ InvalidJson（列名付き）。
+///
+///   meta = {"n": 1} → Map[String, Int32] / list = [1, 2] → Vector[Int32] / meta を Vector で読むと InvalidJson
+@Test
+def testJsonAs(): Unit \ Assert =
+    let row = Row.makeRows(
+        List#{"meta", "list"},
+        List#{List#{SqlValue.Json("{\"n\": 1}"), SqlValue.Json("[1, 2]")}})
+        |> List.head
+        |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    let asMap: Result[DecodeError, Map[String, Int32]] = Decoder.decodeRow(Decoder.jsonAs("meta"), row);
+    let asVector: Result[DecodeError, Vector[Int32]] = Decoder.decodeRow(Decoder.jsonAs("list"), row);
+    let mismatch: Result[DecodeError, Vector[Int32]] = Decoder.decodeRow(Decoder.jsonAs("meta"), row);
+    Assert.assertEq(
+        expected = (Ok(Map#{"n" => 1}), Ok(Vector#{1, 2}), Err("meta")),
+        (asMap, asVector, mismatch |> Result.mapErr(Decoder.errorColumn)))

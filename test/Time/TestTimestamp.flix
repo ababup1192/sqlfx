@@ -61,6 +61,15 @@ def testFromCivilInDstGap(): Unit \ Assert =
         Assert.assertEq(expected = None, Timestamp.fromCivil(gap))
     } with TimeZone.runWith(newYork)
 
+/// 夏時間の重なり（ニューヨーク 2026-11-01 01:30 は 2 回ある）は早い方（EDT、UTC-4）を取る。
+@Test
+def testFromCivilInDstOverlap(): Unit \ Assert =
+    let newYork = Zone.fromName("America/New_York") |> Option.getWithDefault(Zone.utc());
+    let overlap = { date = Date.fromYmd({ year = 2026, month = 11, day = 1 }) |> Option.getWithDefault(Date.fromEpochDay(0)), hour = 1, minute = 30, second = 0, micro = 0 };
+    run {
+        Assert.assertEq(expected = Some("2026-11-01T05:30:00Z"), Timestamp.fromCivil(overlap) |> Option.map(Timestamp.toIso8601))
+    } with TimeZone.runWith(newYork)
+
 /// format は全トークンをゾーン込みで出す。
 ///
 ///   2026-09-06T01:02:03.456Z を東京で → 2026-09-06 10:02:03.456 September Sunday JST +09:00
