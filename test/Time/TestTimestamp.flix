@@ -67,13 +67,8 @@ def testFromCivilInDstGap(): Unit \ Assert =
 @Test
 def testFormatTokens(): Unit \ Assert =
     let t = at("2026-09-06T01:02:03.456Z");
-    let tokens = List#{
-        Format.Year, Format.Text("-"), Format.Month2, Format.Text("-"), Format.Day2, Format.Text(" "),
-        Format.Hour2, Format.Text(":"), Format.Minute2, Format.Text(":"), Format.Second2, Format.Text("."), Format.Millis3, Format.Text(" "),
-        Format.MonthName, Format.Text(" "), Format.Weekday, Format.Text(" "), Format.ZoneName, Format.Text(" "), Format.Offset
-    };
     run {
-        Assert.assertEq(expected = "2026-09-06 10:02:03.456 September Sunday JST +09:00", Timestamp.format(tokens, t))
+        Assert.assertEq(expected = "2026-09-06 10:02:03.456 September Sunday JST +09:00", Timestamp.format(Format.pattern("yyyy-MM-dd HH:mm:ss.SSS MMMM EEEE zzz xxx"), t))
     } with TimeZone.runWith(tokyo())
 
 /// UTC では offset が Z でなく +00:00 に揃う。iso8601Minute の定数も確かめる。

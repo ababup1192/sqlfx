@@ -343,7 +343,7 @@ run { Blog.publishDue() } with TimeTest.runFrozen({ now = "2026-09-06T00:00:00Z"
 
 - **瞬間と暦日は別の型**。`Timestamp` 同士の比較と算術は純粋。`Date` に落とす所だけ `TimeZone` が付く
 - **ゾーンは effect で差し込む**。表示の関数は引数にゾーンを持たず、型に `\ TimeZone` が出る。システム既定のゾーンを返す関数は無いので、`TimeZone.runWith` を書いた所で必ず明示的に決まる
-- **書式はトークンの List**（`Format.Year`, `Format.Month2`, `Format.Text("-")` …）。`yyyy` / `YYYY` の取り違えが型で消える。ISO 8601 は `toIso8601` / `fromIso8601`
+- **書式は `Format.pattern("yyyy-MM-dd HH:mm")`**。受ける文字は `yyyy M MM MMMM d dd EEEE HH mm ss SSS zzz xxx` と `'...'` だけで、`YYYY` や `hh` は `bug!` で止まる。中身はトークンの List なので直接並べてもよい。ISO 8601 は `toIso8601` / `fromIso8601`
 - JSON は `Decoder.json`（`Util.Json.Json`）か `Decoder.jsonAs`（`FromJson` のある型へ）。書くときは `ToJson` で `Json.Json` にして渡す。読めない JSON は `DecodeError.InvalidJson`
 - `Uuid.random()` は `NonDet`、`Uuid.fromString` は形を検証して `Option`
 

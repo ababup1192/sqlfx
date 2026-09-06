@@ -2,6 +2,13 @@ use Format.Format
 
 // Date: 年月日の検証、ISO 8601 の往復、日数の算術、表示。ゾーンには依存しない。
 
+/// pattern は書式文字列をトークンに変える。'...' は素の文字、記号はそのまま。iso8601Date の定数と同じ物になる。
+@Test
+def testPattern(): Unit \ Assert =
+    Assert.assertEq(
+        expected = (Format.iso8601Minute(), List#{Format.Text("at "), Format.Hour2, Format.Text("h")}),
+        (Format.pattern("yyyy-MM-dd HH:mm"), Format.pattern("'at 'HH'h'")))
+
 /// 2 月 30 日や 13 月は None。うるう日は Some。
 @Test
 def testFromYmd(): Unit \ Assert =
@@ -28,8 +35,8 @@ def testIso8601AndYmd(): Unit \ Assert =
 def testDayArithmetic(): Unit \ Assert =
     let d = Date.fromIso8601("2026-09-06") |> Option.getWithDefault(Date.fromEpochDay(0));
     Assert.assertEq(
-        expected = ("2026-10-06", 30, 7, "September 06, Sunday"),
+        expected = ("2026-10-06", 30, 7, "September 6, 2026 (Sunday)"),
         (Date.toIso8601(d |> Date.plusDays(30)),
          Date.daysBetween(d, d |> Date.plusDays(30)),
          Date.weekday(d),
-         Date.format(List#{Format.MonthName, Format.Text(" "), Format.Day2, Format.Text(", "), Format.Weekday}, d)))
+         Date.format(Format.pattern("MMMM d, yyyy (EEEE)"), d)))
