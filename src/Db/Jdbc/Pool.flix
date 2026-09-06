@@ -35,6 +35,9 @@ mod Pool {
     ///
     /// プールを開く。この時点では接続しない（最初の borrow で開く）。
     ///
+    /// WhyNot: `initializationFailTimeout` を -1 にするのは、既定の fail-fast だと `open` の時点で接続しに行き、
+    /// 届かなければ Java の例外を投げて `TransientDbErr` の道を通らないため。届くかは最初の `borrow` で分かる。
+    ///
     /// WhyNot: HikariCP に `jdbcUrl` を渡さないのは、ドライバをクラス名で探す経路が Flix の Maven クラスローダで
     /// 効かないから（`Jdbc.connect` と同じ理由）。pgjdbc の DataSource をこちらで作って渡す。
     ///
@@ -47,6 +50,7 @@ mod Pool {
         hikari.setDataSource(source);
         hikari.setMaximumPoolSize(config#maxConnections);
         hikari.setConnectionTimeout(Int32.toInt64(config#borrowTimeoutMs));
+        hikari.setInitializationFailTimeout(-1i64);
         Pool.Pool(new HikariDataSource(hikari))
 
     ///

@@ -50,13 +50,21 @@ make test-unit   # DB 無しのテスト
 make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して、止める
 ```
 
-利用側のプロジェクトは `flix.toml` に pgjdbc を書き、本体を `src/sqlfx/` に写す（`examples/blog/Makefile` の `vendor`）。
-本体を GitHub にリリースしたら `[dependencies]` に切り替える。
+利用側のプロジェクトは `flix.toml` の `[dependencies]` に GitHub の release を書く。ライブラリ（`Db` / `Q/Fragment` / `Time` / `Uuid`）だけが
+`.fpkg` に入っていて、`gen` と `migrate` の CLI と生成器は入っていない（`make pkg` が作り、`make release` が release に付ける）。
 
 ```toml
+[dependencies]
+"github:ababup1192/sqlfx" = "0.1.0"
+
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
+"com.zaxxer:HikariCP" = "5.1.0"
+"org.slf4j:slf4j-nop" = "1.7.36"
 ```
+
+生成器は利用側からもこのリポジトリの `bin/flix run -- gen <migrations> <queries> <out>` で動かす。手元で未リリースの本体を試すなら
+`examples/blog/Makefile` の `vendor` のように `src/sqlfx/` に写す。
 
 ## 2. `.q` から関数を生成する
 

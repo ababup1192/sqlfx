@@ -1,4 +1,4 @@
-.PHONY: check test test-unit test-pg gen gen-check test-examples db-up db-down
+.PHONY: check test test-unit test-pg gen gen-check test-examples db-up db-down pkg release
 
 check:
 	bin/flix check
@@ -46,3 +46,25 @@ db-up:
 
 db-down:
 	docker compose down -v
+
+# ---- 配布 ----
+# ライブラリだけを .fpkg に詰める。Main.flix（gen / migrate の CLI）と Q/ の生成器は入れない。
+# WhyNot: src/ をそのまま build-pkg しないのは、利用側の main と `def main` が、生成器の Schema モジュールが
+# 利用側の同名モジュールと衝突するため。生成器は利用側からも `bin/flix run -- gen` でこのリポジトリの main を使う。
+PKG_DIR = build/sqlfx
+
+pkg:
+	rm -rf $(PKG_DIR)
+	mkdir -p $(PKG_DIR)/src/Q
+	cp flix.toml $(PKG_DIR)/flix.toml
+	cp -R src/Db src/Time src/Uuid $(PKG_DIR)/src/
+	cp src/Q/Fragment.flix $(PKG_DIR)/src/Q/
+	cd $(PKG_DIR) && $(CURDIR)/bin/flix build-pkg
+	@ls -l $(PKG_DIR)/artifact/
+
+# GitHub の release に .fpkg を付ける。利用側は flix.toml の [dependencies] に "github:ababup1192/sqlfx" = "<version>" と書く。
+# version は flix.toml の [package] version と揃える（Flix は tag v<version> の release から .fpkg を取る）
+VERSION = $(shell sed -n 's/^version *= *"\(.*\)"/\1/p' flix.toml)
+
+release: pkg
+	gh release create v$(VERSION) $(PKG_DIR)/artifact/sqlfx.fpkg --title "v$(VERSION)" --notes "sqlfx $(VERSION)"
