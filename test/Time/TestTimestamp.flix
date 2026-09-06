@@ -38,8 +38,8 @@ def testArithmetic(): Unit \ Assert =
 @Test
 def testToCivilDependsOnZone(): Unit \ Assert =
     let t = at("2026-09-05T20:00:00Z");
-    let inTokyo = TimeZone.runWith(tokyo(), () -> Timestamp.toCivil(t));
-    let inUtc = TimeZone.runWith(Zone.utc(), () -> Timestamp.toCivil(t));
+    let inTokyo = run { Timestamp.toCivil(t) } with TimeZone.runWith(tokyo());
+    let inUtc = run { Timestamp.toCivil(t) } with TimeZone.runWith(Zone.utc());
     Assert.assertEq(
         expected = (("2026-09-06", 5), ("2026-09-05", 20)),
         ((Date.toIso8601(inTokyo#date), inTokyo#hour), (Date.toIso8601(inUtc#date), inUtc#hour)))
@@ -52,8 +52,8 @@ def testFromCivil(): Unit \ Assert =
     let gap = { date = Date.fromYmd({ year = 2026, month = 3, day = 8 }) |> Option.getWithDefault(Date.fromEpochDay(0)), hour = 2, minute = 30, second = 0, micro = 0 };
     Assert.assertEq(
         expected = (Some("2026-09-06T01:30:00Z"), None),
-        (TimeZone.runWith(tokyo(), () -> Timestamp.fromCivil(civil)) |> Option.map(Timestamp.toIso8601),
-         TimeZone.runWith(newYork, () -> Timestamp.fromCivil(gap))))
+        (run { Timestamp.fromCivil(civil) |> Option.map(Timestamp.toIso8601) } with TimeZone.runWith(tokyo()),
+         run { Timestamp.fromCivil(gap) } with TimeZone.runWith(newYork)))
 
 /// format は全トークンをゾーン込みで出す。
 ///
@@ -68,14 +68,14 @@ def testFormatTokens(): Unit \ Assert =
     };
     Assert.assertEq(
         expected = ("2026-09-06 10:02:03.456 September Sunday JST +09:00", "2026-09-06 01:02", "+00:00"),
-        (TimeZone.runWith(tokyo(), () -> Timestamp.format(tokens, t)),
-         TimeZone.runWith(Zone.utc(), () -> Timestamp.format(Format.iso8601Minute(), t)),
-         TimeZone.runWith(Zone.utc(), () -> Timestamp.format(List#{Format.Offset}, t))))
+        (run { Timestamp.format(tokens, t) } with TimeZone.runWith(tokyo()),
+         run { Timestamp.format(Format.iso8601Minute(), t) } with TimeZone.runWith(Zone.utc()),
+         run { Timestamp.format(List#{Format.Offset}, t) } with TimeZone.runWith(Zone.utc())))
 
 /// runFrozen は now と today を止める。今が 2026-09-05T20:00:00Z なら、東京の今日は 9/6。
 @Test
 def testRunFrozen(): Unit \ Assert =
-    let (now, today) = TimeTest.runFrozen({ now = "2026-09-05T20:00:00Z", zone = tokyo() }, () -> (Timestamp.now(), Date.today()));
+    let (now, today) = run { (Timestamp.now(), Date.today()) } with TimeTest.runFrozen({ now = "2026-09-05T20:00:00Z", zone = tokyo() });
     Assert.assertEq(expected = ("2026-09-05T20:00:00Z", "2026-09-06"), (Timestamp.toIso8601(now), Date.toIso8601(today)))
 
 /// 無いゾーン名は None。

@@ -338,7 +338,7 @@ Timestamp.toCivil(row#createdAt)#date                                 // その�
 Date.fromYmd({ year = 2026, month = 2, day = 30 })                    // None。存在しない日は作れない
 
 run { render(posts) } with TimeZone.runWith(zone)                     // 境界で 1 回。zone は Zone.fromName("Asia/Tokyo") で作る
-TimeTest.runFrozen({ now = "2026-09-06T00:00:00Z", zone = Zone.utc() }, () -> Blog.publishDue())   // テストで時刻とゾーンを止める
+run { Blog.publishDue() } with TimeTest.runFrozen({ now = "2026-09-06T00:00:00Z", zone = Zone.utc() })   // テストで時刻とゾーンを止める
 ```
 
 - **瞬間と暦日は別の型**。`Timestamp` 同士の比較と算術は純粋。`Date` に落とす所だけ `TimeZone` が付く
