@@ -147,6 +147,14 @@ def testRawSet(): Unit \ Assert =
     let changes = RawSql.runWithAllow(() -> Fragment.noChange() |> Fragment.set(ageCol(), 0) |> Fragment.rawSet("age = age * 2"));
     Assert.assertEq(expected = ("age = $1, age = age * 2", List#{SqlValue.Int32(0)}), Fragment.appendChanges(changes, Nil))
 
+/// パラメータ付きの生 SQL は ? が続き番号の $n になり、値はプレースホルダに積まれる。
+@Test
+def testRawPredWith(): Unit \ Assert =
+    let rendered = run {
+        Fragment.renderPred(Fragment.both(Fragment.rawPredWith("a = ? AND b = ?", List#{SqlValue.Int32(1), SqlValue.Str("x")}), Fragment.rawPredWith("c = ?", List#{SqlValue.Bool(true)})), 3)
+    } with RawSql.runWithAllow;
+    Assert.assertEq(expected = ("((a = $3 AND b = $4) AND (c = $5))", List#{SqlValue.Int32(1), SqlValue.Str("x"), SqlValue.Bool(true)}), rendered)
+
 /// 生 SQL は RawSql が要り、render では括弧に包まれる。
 @Test
 def testRawPred(): Unit \ Assert =

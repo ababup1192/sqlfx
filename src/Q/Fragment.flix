@@ -90,6 +90,8 @@ mod Fragment {
         case Not(Pred[row])
         /// 生 SQL。作るには RawSql エフェクトが要る
         case Raw(String)
+        /// パラメータ付きの生 SQL。`?` を左から順に `$n` に置き換える。作るには RawSql エフェクトが要る
+        case RawWith(String, List[SqlValue])
     }
 
     ///
@@ -219,6 +221,14 @@ mod Fragment {
         RawSql.allow(sql);
         Pred.Raw(sql)
 
+    ///
+    /// パラメータ付きの生 SQL を述語にする。`?` が params の順に `$n` になる。値は文面に入らない。
+    /// 断片 DSL の case で組めない形（JSONB の配列を副問い合わせで見る、など）のための逃げ道。
+    ///
+    pub def rawPredWith(sql: String, params: List[SqlValue]): Pred[row] \ RawSql =
+        RawSql.allow(sql);
+        Pred.RawWith(sql, params)
+
     pub def asc(col: Col[row, a, n]): Order[row] with IsColumn[n] = Order.Asc(colName(col))
     pub def desc(col: Col[row, a, n]): Order[row] with IsColumn[n] = Order.Desc(colName(col))
 
@@ -324,6 +334,12 @@ mod Fragment {
                 let (sql, innerParams, innerNext) = renderLoop(inner, state);
                 ("(NOT ${sql})", innerParams, innerNext)
             case Pred.Raw(sql) => ("(${sql})", params, next)
+            case Pred.RawWith(sql, values) =>
+                let count = List.length(values);
+                let pieces = String.splitOn(substr = "?", sql);
+                let numbered = List.zip(List.range(next, next + count) |> List.map(n -> "$${n}"), List.drop(1, pieces))
+                    |> List.foldLeft((acc, pair) -> { let (placeholder, piece) = pair; acc + placeholder + piece }, List.head(pieces) |> Option.getWithDefault(""));
+                ("(${numbered})", List.append(List.reverse(values), params), next + count)
         }
 
     def binary(keyword: String, left: Pred[row], right: Pred[row], state: (List[SqlValue], Int32)): (String, List[SqlValue], Int32) =
