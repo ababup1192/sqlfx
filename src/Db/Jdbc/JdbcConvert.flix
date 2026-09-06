@@ -33,7 +33,7 @@ mod JdbcConvert {
     ///
     pub def rewritePlaceholders(sql: String, params: List[SqlValue]): Option[(String, List[SqlValue])] =
         let paramVector = List.toVector(params);
-        let (chars, refs, _, pending) = String.toList(sql) |> List.foldLeft(step, (Nil, Nil, false, None));
+        let (chars, refs, _, pending) = String.toList(stripLineComments(sql)) |> List.foldLeft(step, (Nil, Nil, false, None));
         let (flushedChars, flushedRefs) = flushDigits(chars, refs, pending);
         let sqlOut = region rc {
             let sb = StringBuilder.empty(rc);
@@ -61,6 +61,37 @@ mod JdbcConvert {
                     (chars, refs, inQuote, Some(0))
                 else
                     (ch :: chars, refs, inQuote, None)
+        }
+
+    ///
+    /// `--` から行末までを落とす。コメントの中の `'` や `$1` を見ないため。単一引用符の中の `--` は残す。
+    ///
+    pub def stripLineComments(sql: String): String =
+        let (chars, _, _) = String.toList(sql) |> List.foldLeft(commentStep, (Nil, false, false));
+        List.reverse(chars) |> charsToString
+
+    ///
+    /// (出力の逆順, 引用符の中か, コメントの中か)。
+    ///
+    def commentStep(state: (List[Char], Bool, Bool), ch: Char): (List[Char], Bool, Bool) =
+        let (chars, inQuote, inComment) = state;
+        if (inComment)
+            (if (ch == '\n') ch :: chars else chars, false, ch != '\n')
+        else if (ch == '\'')
+            (ch :: chars, not inQuote, false)
+        else if (ch == '-' and not inQuote)
+            match chars {
+                case '-' :: rest => (rest, false, true)
+                case _ => (ch :: chars, inQuote, false)
+            }
+        else
+            (ch :: chars, inQuote, false)
+
+    def charsToString(chars: List[Char]): String =
+        region rc {
+            let sb = StringBuilder.empty(rc);
+            List.forEach(c -> StringBuilder.append(c, sb), chars);
+            StringBuilder.toString(sb)
         }
 
     ///
@@ -158,15 +189,15 @@ mod JdbcConvert {
         else if (jdbcType == Types.CHAR or jdbcType == Types.VARCHAR or jdbcType == Types.LONGVARCHAR)
             rs -> { let s: String = rs.getString(index); nullOr(rs, SqlValue.Str(s)) }
         else if (jdbcType == Types.BINARY or jdbcType == Types.VARBINARY or jdbcType == Types.LONGVARBINARY)
-            rs -> { let bytes: Array[Int8, Static] = rs.getBytes(index); nullOr(rs, SqlValue.Bytes(Array.toVector(bytes))) }
+            rs -> { let bytes: Array[Int8, Static] = rs.getBytes(index); nullOrConvert(rs, () -> SqlValue.Bytes(Array.toVector(bytes))) }
         else if (jdbcType == Types.TIMESTAMP or jdbcType == Types.TIMESTAMP_WITH_TIMEZONE)
-            rs -> { let t: SqlTimestamp = rs.getTimestamp(index); nullOr(rs, SqlValue.Timestamp(fromSqlTimestamp(t))) }
+            rs -> { let t: SqlTimestamp = rs.getTimestamp(index); nullOrConvert(rs, () -> SqlValue.Timestamp(fromSqlTimestamp(t))) }
         else if (jdbcType == Types.DATE)
-            rs -> { let d: SqlDate = rs.getDate(index); nullOr(rs, SqlValue.Date(fromSqlDate(d))) }
+            rs -> { let d: SqlDate = rs.getDate(index); nullOrConvert(rs, () -> SqlValue.Date(fromSqlDate(d))) }
         else if (jdbcType == Types.ARRAY and typeName == "_int8")
-            rs -> { let a: SqlArray = rs.getArray(index); nullOr(rs, SqlValue.Int64Array(readInt64Array(a))) }
+            rs -> { let a: SqlArray = rs.getArray(index); nullOrConvert(rs, () -> SqlValue.Int64Array(readInt64Array(a))) }
         else if (jdbcType == Types.ARRAY and typeName == "_text")
-            rs -> { let a: SqlArray = rs.getArray(index); nullOr(rs, SqlValue.StrArray(readStrArray(a))) }
+            rs -> { let a: SqlArray = rs.getArray(index); nullOrConvert(rs, () -> SqlValue.StrArray(readStrArray(a))) }
         else if (jdbcType == Types.OTHER and typeName == "uuid")
             rs -> { let s: String = rs.getString(index); nullOr(rs, SqlValue.Uuid(s)) }
         else if (jdbcType == Types.OTHER and (typeName == "json" or typeName == "jsonb"))
@@ -180,6 +211,12 @@ mod JdbcConvert {
     ///
     def nullOr(resultSet: ResultSet, value: SqlValue): SqlValue \ IO =
         if (resultSet.wasNull()) SqlValue.Null else value
+
+    ///
+    /// 変換が要る型用。NULL のときは変換を呼ばない（Java の null に触ると落ちる）。
+    ///
+    def nullOrConvert(resultSet: ResultSet, convert: Unit -> SqlValue \ IO): SqlValue \ IO =
+        if (resultSet.wasNull()) SqlValue.Null else convert()
 
     ///
     /// SQL の配列を ResultSet 経由で読む（Object[] のキャストを避ける）。2 列目が値。
@@ -207,12 +244,13 @@ mod JdbcConvert {
         OffsetDateTime.ofInstant(Instant.ofEpochSecond(seconds, nanos), ZoneOffset.UTC)
 
     ///
-    /// java.sql.Timestamp → epoch マイクロ秒。getTime はミリ秒、getNanos は秒未満のナノ秒。
+    /// java.sql.Timestamp → epoch マイクロ秒。Instant 経由なら 1970 年より前でも秒と秒未満の符号が揃う。
     ///
     def fromSqlTimestamp(t: SqlTimestamp): Int64 \ IO =
-        let millis: Int64 = t.getTime();
-        let nanos: Int32 = t.getNanos();
-        (millis / 1000i64) * 1000000i64 + Int32.toInt64(nanos) / 1000i64
+        let instant: Instant = t.toInstant();
+        let seconds: Int64 = instant.getEpochSecond();
+        let nanos: Int32 = instant.getNano();
+        seconds * 1000000i64 + Int32.toInt64(nanos) / 1000i64
 
     ///
     /// java.sql.Date → 1970-01-01 からの日数。

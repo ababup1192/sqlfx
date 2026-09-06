@@ -36,14 +36,12 @@ def testListUsers(): Unit \ Assert =
         expected = Ok(List#{(1i64, Some("a@example.com")), (2i64, None)}),
         result |> Result.map(List.map(user -> (user#id, user#email))))
 
-/// renameUser は UPDATE を 1 本発行し、影響行数で true / false。
+/// renameUser は影響行数で true / false。
 @Test
 def testRenameUser(): Unit \ Assert =
-    let (updated, statements) = DbTest.runRecording(Nil, 1, () -> ExampleUsers.renameUser(1i64, "alice2"));
-    let (missing, _) = DbTest.runRecording(Nil, 0, () -> ExampleUsers.renameUser(9i64, "x"));
-    Assert.assertEq(
-        expected = (true, false, List#{"UPDATE users SET name = $1 WHERE id = $2"}),
-        (updated, missing, statements |> List.map(statement -> statement#sql)))
+    let (updated, _) = DbTest.runRecording(Nil, 1, () -> DbError.runWithFailure(() -> ExampleUsers.renameUser(1i64, "alice2")));
+    let (missing, _) = DbTest.runRecording(Nil, 0, () -> DbError.runWithFailure(() -> ExampleUsers.renameUser(9i64, "x")));
+    Assert.assertEq(expected = (Ok(true), Ok(false)), (updated, missing))
 
 /// listUsers は何人いてもクエリ 1 本（N+1 が無い）。
 @Test

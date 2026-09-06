@@ -35,3 +35,9 @@ def testRetryDoesNotRetryDbErr(): Unit \ Assert =
         (DbError.runWithFailure(() -> Retry.withRetry(3, thunk)), Ref.get(counter))
     };
     Assert.assertEq(expected = (Err(DbError.DbFailure.Permanent("uniqueViolation users_email_key")), 1), (result |> Result.map(_ -> ()), calls))
+
+/// attempts が 1 未満でも 1 回は走り、枯渇のメッセージも 1 回と言う。
+@Test
+def testRetryAttemptsBelowOneRunsOnce(): Unit \ Assert =
+    let result: Result[DbError.DbFailure, Unit] = DbError.runWithFailure(() -> Retry.withRetry(0, () -> TransientDbErr.deadlock()));
+    Assert.assertEq(expected = Err(DbError.DbFailure.Permanent("retryExhausted deadlock after 1 attempts")), result)

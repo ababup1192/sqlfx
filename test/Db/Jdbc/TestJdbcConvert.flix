@@ -28,3 +28,9 @@ def testRewriteSkipsQuotesAndBareDollar(): Unit \ Assert =
 @Test
 def testRewriteOutOfRange(): Unit \ Assert =
     Assert.assertEq(expected = None, JdbcConvert.rewritePlaceholders("SELECT $2", List#{SqlValue.Int32(1)}))
+
+/// `--` コメントは落ち、コメント中の `'` と `$1` は見ない。引用符の中の `--` は残る。
+@Test
+def testRewriteDropsLineComments(): Unit \ Assert =
+    let rewritten = JdbcConvert.rewritePlaceholders("SELECT 'a--b' -- it's $9\nFROM t WHERE id = $1", List#{SqlValue.Int64(1i64)});
+    Assert.assertEq(expected = Some(("SELECT 'a--b' \nFROM t WHERE id = ?", List#{SqlValue.Int64(1i64)})), rewritten)

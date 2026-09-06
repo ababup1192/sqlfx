@@ -128,7 +128,7 @@ pub eff SqlWrite { def execute(sql: String, params: List[SqlValue]): Int32 }
 - `fetch` は結果を全部 materialize して返す。大量データの `streamQuery` は層 2 で別 op
 - プレースホルダは PG 流の `$1` `$2` で書く（psql / EXPLAIN にそのまま貼れる）。pgjdbc は `?` しか解釈しないので、
   JDBC ハンドラが `JdbcConvert.rewritePlaceholders`（純粋）で `?` に書き換え、出現順にパラメータを並べ直す。
-  同じ `$1` を 2 回書けば値も 2 回送る。params に無い `$n` は `DbErr.corrupt`
+  同じ `$1` を 2 回書けば値も 2 回送る。params に無い `$n` は `DbErr.other`
 - `one` 相当（`Option[Row]`）は `fetch` の上の関数 `Sql.fetchOne` で作る（op を増やさない）
 - `Sql.fetchAs(decoder, sql, params): List[a] \ {SqlRead, DbErr}` と `Sql.fetchOneAs` がデコードまで行い、
   失敗は `DbErr.decodeError` に持ち上げる
@@ -147,7 +147,7 @@ pub eff DbErr {
     def schemaMismatch(detail: String): Void
     def decodeError(column: String, detail: String): Void
     def retryExhausted(last: String): Void
-    def corrupt(detail: String): Void
+    def other(detail: String): Void
 }
 ```
 
@@ -157,20 +157,25 @@ pub eff DbErr {
 JDBC ハンドラは `SQLException` を直接 op に翻訳せず、まず純粋な enum に落とす:
 
 ```flix
-/// sqlstate をどの op に翻訳するか。翻訳表は DB 無しでテストする。
+/// 2 つのエフェクトの全 op を値にした形。op と 1:1 で、raise で op に戻せる。
 pub enum DbErrorKind with Eq, Order, ToString {
-    case Conflict(String)        // 23505 → DbErr.uniqueViolation
-    case InvalidRef(String)      // 23503 → DbErr.foreignKeyViolation
-    case Deadlock                // 40001, 40P01
-    case Timeout(Int32)          // 57014（statement_timeout）。ms が分からなければ 0
-    case ConnectionLost(String)  // 08xxx
-    case SchemaMismatch(String)  // 42P01, 42703, 42883, 42804
-    case Corrupt(String)         // その他
+    case Deadlock                     // 40001, 40P01
+    case Timeout(Int32)               // 57014（statement_timeout）。ms が分からなければ 0
+    case ConnectionLost(String)       // 08xxx
+    case UniqueViolation(String)      // 23505（制約名は pgjdbc の ServerErrorMessage から）
+    case ForeignKeyViolation(String)  // 23503
+    case SchemaMismatch(String)       // 42P01, 42703, 42883, 42804
+    case DecodeError(String, String)  // 結果セットの列が読めない
+    case RetryExhausted(String)       // withRetry の枯渇
+    case Other(String)                // その他（sqlstate とメッセージ）
 }
-pub def classify(sqlState: String, message: String): DbErrorKind
+pub def SqlState.classify(sqlState: String, message: String): DbErrorKind
+pub def DbError.raise(kind: DbErrorKind): a \ {TransientDbErr, DbErr}
+pub def DbError.runWithKind(thunk): Result[DbErrorKind, a] \ ef - {TransientDbErr, DbErr}
 ```
 
-`DbError.raise(kind)` が enum を対応する op に変えて投げる。
+`runWithKind` が「op → 値」の唯一のハンドラで、`runWithFailure` / `Tx.withTx` / `Jdbc.withConnection` はこれから作る。
+op を足すときに触るのは eff・`DbErrorKind`・`raise`・`runWithKind`・`describe` で、全部 `DbError.flix` の中。
 
 業務コードは Result を返さず、エフェクトのまま上へ流す。境界で値にしたいときは 2 つの落とし方がある:
 
@@ -264,4 +269,32 @@ DbError.runWithFailure(() -> DbTest.runWithRows(rows, () -> ExampleUsers.findUse
 | 1 | `test/Db/TestSqlValue.flix` / `TestDecoder.flix` / `test/Db/Jdbc/TestSqlState.flix` | 純粋関数 |
 | 2 | `test/Example/TestUsers.flix` / `test/Db/TestDbTest.flix` | `runWithRows` でユースケースを検証 |
 | 3 | 同上 | `runRecording` でクエリ数の上限（`assertLe`）と発行 SQL |
-| 5 | `test-pg/TestJdbc.flix` | 実 PG に当たる。`make test-pg` がコンテナを立てて `test/Pg/` へ写して回し、止める。DSN が無ければ `bug!` |
+| 5 | `test/Pg/TestJdbc.flix` | 実 PG に当たる。`make test-pg` がコンテナを立てて回し、止める。`make test-unit` は build/unit/ の写しで回すので含まれない。DSN が無ければ `bug!` |
+
+## op は Result を返し、`Sql.*` が呼び出し側で op にする
+
+Flix のハンドラ本体は `run` の外側で評価されるので、JDBC ハンドラの中で `DbErr` を投げると、
+thunk の内側に被せたハンドラ（アプリが制約違反を業務エラーに変える所）には届かない（`docs/spikes.md` の実験）。
+そこで op は `Result[DbErrorKind, _]` を返し、`Sql.fetch` / `Sql.execute` / `Sql.executeReturning` が呼び出し側の文脈で
+`DbError.raise` する。利用者は op を直接呼ばず `Sql.*` を使う。効果は `DbRead = {SqlRead, TransientDbErr, DbErr}` と
+`DbWrite = {SqlWrite, TransientDbErr, DbErr}` の alias で書く。
+
+```flix
+pub def registerUser(name: String, email: String): Result[RegisterError, Int64] \ DbWrite =
+    match DbError.runWithKind(() -> UsersQueries.insertUser({ name = name, email = email, role = "member" })) {
+        case Ok(Some(row)) => Ok(row#id)
+        case Err(DbErrorKind.UniqueViolation("users_email_key")) => Err(RegisterError.EmailTaken(email))
+        case Err(kind) => DbError.raise(kind)
+        ...
+    }
+```
+
+## 後から足した物
+
+- `SqlWrite.executeReturning(sql, params): List[Row]`: `INSERT ... RETURNING` のように書いた上で行も返す文。
+  `Sql.executeReturningAs` / `executeReturningOneAs` でデコードする。書き込みなので効果は `{SqlWrite, DbErr}`
+- `Jdbc.withConnection(config, conn -> ...)`: 開いて `runWithConnection` を被せ、成功でも失敗でも閉じる。Tx が要るなら中で `Tx.withTx(conn, ...)`
+- `Decoder` は `Functor` / `Applicative` / `Monad` の instance を持つので `forA` で列を並べて組める（yield は純粋に書く）
+- `DbTest.runRecordingWith(rowsFor, affected, thunk)`: SQL ごとに行を返しつつ記録する。preload の「クエリは 2 つ」を確かめるのに使う
+- `--` から行末は JDBC ハンドラでも落とす（コメント中の `'` や `$1` を見ないため）
+- `Preload.attach({ parents, parentKey, children, childKey })`: IN 句バッチで取った子を親ごとに束ねる。子は元の順、無い親は Nil。`keyed` の preloader 生成（フェーズ 3）もこれを呼ぶ

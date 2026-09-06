@@ -28,19 +28,19 @@ mod ExampleUsers {
     ///
     /// id で 1 人取る。無ければ None。読むだけなので SqlWrite は付かない。
     ///
-    pub def findUser(id: Int64): Option[User] \ {SqlRead, DbErr} =
+    pub def findUser(id: Int64): Option[User] \ DbRead =
         Sql.fetchOneAs(userDecoder(), "SELECT id, name, email FROM users WHERE id = $1", List#{SqlValue.Int64(id)})
 
     ///
     /// 全員を名前順で取る。
     ///
-    pub def listUsers(): List[User] \ {SqlRead, DbErr} =
+    pub def listUsers(): List[User] \ DbRead =
         Sql.fetchAs(userDecoder(), "SELECT id, name, email FROM users ORDER BY name", Nil)
 
     ///
     /// 名前を変える。書くのでシグネチャに SqlWrite が出る。影響 0 行なら false。unique 違反は DbErr.uniqueViolation で上がる。
     ///
-    pub def renameUser(id: Int64, name: String): Bool \ SqlWrite =
-        SqlWrite.execute("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str(name), SqlValue.Int64(id)}) > 0
+    pub def renameUser(id: Int64, name: String): Bool \ DbWrite =
+        Sql.execute("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str(name), SqlValue.Int64(id)}) > 0
 
 }

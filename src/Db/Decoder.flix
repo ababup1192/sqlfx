@@ -6,6 +6,29 @@ mod Decoder {
     pub enum Decoder[a](Row.Row -> Result[DecodeError, a])
 
     ///
+    /// forA / forM で列を並べて組めるようにする。`Decoder.pure` / `ap` / `flatMap` の別名。
+    ///
+    /// WhyNot: trait の `f` は `\ ef` を許すが、デコーダは行を受け取ってから純粋に走るので、
+    /// `f` の効果を構築時に起こすことはできない。ここでは `f` を純粋と見なして受ける（`unchecked_cast`）。
+    /// forA の yield に効果のある式を書かないこと。書けば型は通るが、効果はデコード時に手続き的に起きる。
+    ///
+    instance Functor[Decoder] {
+        pub def map(f: a -> b \ ef, decoder: Decoder[a]): Decoder[b] \ ef =
+            checked_ecast(Decoder.map(unchecked_cast(f as a -> b), decoder))
+    }
+
+    instance Applicative[Decoder] {
+        pub def point(value: a): Decoder[a] = Decoder.pure(value)
+        pub def ap(function: Decoder[a -> b \ ef], argument: Decoder[a]): Decoder[b] \ ef =
+            checked_ecast(Decoder.ap(argument, unchecked_cast(function as Decoder[a -> b])))
+    }
+
+    instance Monad[Decoder] {
+        pub def flatMap(f: a -> Decoder[b] \ ef, decoder: Decoder[a]): Decoder[b] \ ef =
+            checked_ecast(Decoder.flatMap(unchecked_cast(f as a -> Decoder[b]), decoder))
+    }
+
+    ///
     /// デコードの失敗。列名と理由を持つ。
     ///
     pub enum DecodeError with Eq, Order, ToString {
@@ -94,25 +117,27 @@ mod Decoder {
     ///
     /// 型付きの列デコーダを組む。`extract` が None を返したら TypeMismatch、NULL なら UnexpectedNull。
     ///
-    pub def typed(expected: String, extract: SqlValue.SqlValue -> Option[a], name: String): Decoder[a] =
+    pub def typed(column: { name = String, expected = String }, extract: SqlValue.SqlValue -> Option[a]): Decoder[a] =
+        let name = column#name;
+        let expected = column#expected;
         Decoder.Decoder(row -> Row.get(name, row) |> Option.toOk(DecodeError.MissingColumn(name)) |> Result.flatMap(value ->
             if (SqlValue.isNull(value))
                 Err(DecodeError.UnexpectedNull(name))
             else
                 extract(value) |> Option.toOk(DecodeError.TypeMismatch(name, expected, SqlValue.typeName(value)))))
 
-    pub def bool(name: String): Decoder[Bool] = typed("Bool", SqlValue.asBool, name)
-    pub def int32(name: String): Decoder[Int32] = typed("Int32", SqlValue.asInt32, name)
-    pub def int64(name: String): Decoder[Int64] = typed("Int64", SqlValue.asInt64, name)
-    pub def float64(name: String): Decoder[Float64] = typed("Float64", SqlValue.asFloat64, name)
-    pub def decimal(name: String): Decoder[BigDecimal] = typed("Decimal", SqlValue.asDecimal, name)
-    pub def str(name: String): Decoder[String] = typed("Str", SqlValue.asStr, name)
-    pub def bytes(name: String): Decoder[Vector[Int8]] = typed("Bytes", SqlValue.asBytes, name)
-    pub def timestamp(name: String): Decoder[Int64] = typed("Timestamp", SqlValue.asTimestamp, name)
-    pub def date(name: String): Decoder[Int32] = typed("Date", SqlValue.asDate, name)
-    pub def uuid(name: String): Decoder[String] = typed("Uuid", SqlValue.asUuid, name)
-    pub def json(name: String): Decoder[String] = typed("Json", SqlValue.asJson, name)
-    pub def int64Array(name: String): Decoder[List[Int64]] = typed("Int64Array", SqlValue.asInt64Array, name)
-    pub def strArray(name: String): Decoder[List[String]] = typed("StrArray", SqlValue.asStrArray, name)
+    pub def bool(name: String): Decoder[Bool] = typed({ name = name, expected = "Bool" }, SqlValue.asBool)
+    pub def int32(name: String): Decoder[Int32] = typed({ name = name, expected = "Int32" }, SqlValue.asInt32)
+    pub def int64(name: String): Decoder[Int64] = typed({ name = name, expected = "Int64" }, SqlValue.asInt64)
+    pub def float64(name: String): Decoder[Float64] = typed({ name = name, expected = "Float64" }, SqlValue.asFloat64)
+    pub def decimal(name: String): Decoder[BigDecimal] = typed({ name = name, expected = "Decimal" }, SqlValue.asDecimal)
+    pub def str(name: String): Decoder[String] = typed({ name = name, expected = "Str" }, SqlValue.asStr)
+    pub def bytes(name: String): Decoder[Vector[Int8]] = typed({ name = name, expected = "Bytes" }, SqlValue.asBytes)
+    pub def timestamp(name: String): Decoder[Int64] = typed({ name = name, expected = "Timestamp" }, SqlValue.asTimestamp)
+    pub def date(name: String): Decoder[Int32] = typed({ name = name, expected = "Date" }, SqlValue.asDate)
+    pub def uuid(name: String): Decoder[String] = typed({ name = name, expected = "Uuid" }, SqlValue.asUuid)
+    pub def json(name: String): Decoder[String] = typed({ name = name, expected = "Json" }, SqlValue.asJson)
+    pub def int64Array(name: String): Decoder[List[Int64]] = typed({ name = name, expected = "Int64Array" }, SqlValue.asInt64Array)
+    pub def strArray(name: String): Decoder[List[String]] = typed({ name = name, expected = "StrArray" }, SqlValue.asStrArray)
 
 }

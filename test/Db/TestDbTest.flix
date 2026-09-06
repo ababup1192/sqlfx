@@ -1,7 +1,8 @@
 use SqlValue.SqlValue
 use Row.Row
+use DbError.DbFailure
 
-// DbTest: テストハンドラ 3 種と、Sql / DbError の使い心地。
+// DbTest: テストハンドラと、Sql / DbError の使い心地。失敗は DbError.runWithFailure で 1 層の Result にして比べる。
 
 /// users テーブルの結果セット。
 ///
@@ -18,12 +19,13 @@ def dbTestUserRows(): List[Row] =
 
 /// id と name を組にするデコーダ。
 def userDecoder(): Decoder.Decoder[(Int64, String)] =
-    Decoder.pure(id -> name -> (id, name))
-        |> Decoder.ap(Decoder.int64("id"))
-        |> Decoder.ap(Decoder.str("name"))
+    forA (
+        id <- Decoder.int64("id");
+        name <- Decoder.str("name")
+    ) yield (id, name)
 
 /// ユースケース関数の見本。読むだけ・DB エラーは上へ流す、がシグネチャに出る。
-def findUserName(id: Int64): Option[String] \ {SqlRead, DbErr} =
+def findUserName(id: Int64): Option[String] \ DbRead =
     Sql.fetchOneAs(Decoder.str("name"), "SELECT name FROM users WHERE id = $1", List#{SqlValue.Int64(id)})
 
 // ---- runWithRows ----
@@ -38,32 +40,26 @@ def testRunWithRowsFetchAs(): Unit \ Assert =
 /// fetchOne は先頭 1 行、0 行なら None。
 @Test
 def testFetchOne(): Unit \ Assert =
-    Assert.assertEq(
-        expected = (Some(SqlValue.Str("alice")), None),
-        (
-            DbTest.runWithRows(dbTestUserRows(), () -> Sql.fetchOne("SELECT name FROM users", Nil))
-                |> Option.flatMap(Row.get("name")),
-            DbTest.runWithRows(Nil, () -> Sql.fetchOne("SELECT name FROM users", Nil))
-                |> Option.flatMap(Row.get("name"))
-        ))
+    let first = DbError.runWithFailure(() -> DbTest.runWithRows(dbTestUserRows(), () -> Sql.fetchOne("SELECT name FROM users", Nil) |> Option.flatMap(Row.get("name"))));
+    let none = DbError.runWithFailure(() -> DbTest.runWithRows(Nil, () -> Sql.fetchOne("SELECT name FROM users", Nil) |> Option.flatMap(Row.get("name"))));
+    Assert.assertEq(expected = (Ok(Some(SqlValue.Str("alice"))), Ok(None)), (first, none))
 
 /// fetchAs はデコードに失敗したら DbErr.decodeError を投げる（静かな半壊にしない）。
 @Test
 def testFetchAsRaisesDbErrOnDecodeError(): Unit \ Assert =
     Assert.assertEq(
-        expected = Err(DbError.DbFailure.Permanent("email: column 'email' is missing")),
+        expected = Err(DbFailure.Permanent("email: column 'email' is missing")),
         DbError.runWithFailure(() -> DbTest.runWithRows(dbTestUserRows(), () -> Sql.fetchAs(Decoder.str("email"), "SELECT id, name FROM users", Nil))))
 
 /// runWithTable は SQL ごとに返す行を変えられる。知らない SQL は空。
 @Test
 def testRunWithTable(): Unit \ Assert =
-    let table = sql -> if (sql == "SELECT id, name FROM users") Some(dbTestUserRows()) else None;
-    Assert.assertEq(
-        expected = (2, 0),
-        (
-            DbTest.runWithTable(table, () -> SqlRead.fetch("SELECT id, name FROM users", Nil)) |> List.length,
-            DbTest.runWithTable(table, () -> SqlRead.fetch("SELECT 1", Nil)) |> List.length
-        ))
+    let rowsFor = sql -> if (sql == "SELECT id, name FROM users") Some(dbTestUserRows()) else None;
+    let counts = DbError.runWithFailure(() -> DbTest.runWithTable(rowsFor, () -> (
+        Sql.fetch("SELECT id, name FROM users", Nil) |> List.length,
+        Sql.fetch("SELECT 1", Nil) |> List.length
+    )));
+    Assert.assertEq(expected = Ok((2, 0)), counts)
 
 // ---- ユースケース関数 ----
 
@@ -74,35 +70,45 @@ def testFindUserName(): Unit \ Assert =
     let missing = DbError.runWithFailure(() -> DbTest.runWithRows(Nil, () -> findUserName(9i64)));
     Assert.assertEq(expected = (Ok(Some("alice")), Ok(None)), (found, missing))
 
+/// ハンドラが返した失敗は、呼び出し側の内側の runWithKind で拾える（アプリが制約違反を業務エラーに変える形）。
+///
+///   handler が Err(UniqueViolation) を返す → Sql.execute が op にする → 呼び出し側の runWithKind が受ける
+@Test
+def testFailureFromHandlerIsCatchableAtCallSite(): Unit \ Assert =
+    let caught = run {
+        DbError.runWithKind(() -> Sql.execute("INSERT INTO users (name) VALUES ('a')", Nil))
+    } with handler SqlWrite {
+        def execute(_sql, _params, resume) = resume(Err(DbError.DbErrorKind.UniqueViolation("users_name_key")))
+        def executeReturning(_sql, _params, resume) = resume(Ok(Nil))
+    };
+    Assert.assertEq(expected = Err(DbError.DbErrorKind.UniqueViolation("users_name_key")), caught)
+
 // ---- runRecording ----
 
-/// runRecording は発行した文を順に記録する。N+1 の回帰は件数の上限で表明する。
+/// runRecording は発行した文を順に記録する。
 ///
 ///   fetch  SELECT ...  $1 = 1
 ///   execute UPDATE ... $1 = "x", $2 = 1
 @Test
 def testRunRecordingStatements(): Unit \ Assert =
-    let (affected, statements) = DbTest.runRecording(dbTestUserRows(), 1, () -> {
-        let _ = SqlRead.fetch("SELECT name FROM users WHERE id = $1", List#{SqlValue.Int64(1i64)});
-        SqlWrite.execute("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str("x"), SqlValue.Int64(1i64)})
-    });
+    let (affected, statements) = DbTest.runRecording(dbTestUserRows(), 1, () -> DbError.runWithFailure(() -> {
+        discard Sql.fetch("SELECT name FROM users WHERE id = $1", List#{SqlValue.Int64(1i64)});
+        Sql.execute("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str("x"), SqlValue.Int64(1i64)})
+    }));
     Assert.assertEq(
-        expected = (1, List#{
+        expected = (Ok(1), List#{
             ("SELECT name FROM users WHERE id = $1", List#{SqlValue.Int64(1i64)}),
             ("UPDATE users SET name = $1 WHERE id = $2", List#{SqlValue.Str("x"), SqlValue.Int64(1i64)})
         }),
         (affected, statements |> List.map(statement -> (statement#sql, statement#params))))
 
-/// クエリ数の上限テストの形: ループで N 回読んでも発行数は N 以下。
+/// クエリ数のテストの形: ループで 5 回読めば発行数は 5。
 @Test
-def testRunRecordingQueryCountUpperBound(): Unit \ Assert =
+def testRunRecordingQueryCount(): Unit \ Assert =
     let ids = List.range(0, 5) |> List.map(Int32.toInt64);
-    let (_, statements) = DbTest.runRecording(dbTestUserRows(), 0, () ->
-        List.forEach(id -> {
-            let _ = SqlRead.fetch("SELECT name FROM users WHERE id = $1", List#{SqlValue.Int64(id)});
-            ()
-        }, ids));
-    Assert.assertTrue(List.length(statements) <= 5)
+    let (_, statements) = DbTest.runRecording(dbTestUserRows(), 0, () -> DbError.runWithFailure(() ->
+        List.forEach(id -> discard Sql.fetch("SELECT name FROM users WHERE id = $1", List#{SqlValue.Int64(id)}), ids)));
+    Assert.assertEq(expected = 5, List.length(statements))
 
 // ---- runLogging（ハンドラの合成） ----
 
@@ -111,6 +117,6 @@ def testRunRecordingQueryCountUpperBound(): Unit \ Assert =
 def testRunLoggingForwards(): Unit \ {Assert, IO} =
     let (rows, statements) = DbTest.runRecording(dbTestUserRows(), 0, () ->
         run {
-            DbTest.runLogging(() -> SqlRead.fetch("SELECT id, name FROM users", Nil))
+            DbTest.runLogging(() -> DbError.runWithFailure(() -> Sql.fetch("SELECT id, name FROM users", Nil)))
         } with Logger.runWithIO);
-    Assert.assertEq(expected = (2, 1), (List.length(rows), List.length(statements)))
+    Assert.assertEq(expected = (Ok(2), 1), (Result.map(List.length, rows), List.length(statements)))

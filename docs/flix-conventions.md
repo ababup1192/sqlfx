@@ -16,6 +16,8 @@
 このリポジトリに機械の検査は無いので、目視で避ける。
 DB ライブラリで踏みやすいのは `query`（→ `runQuery` / `sqlQuery`）、`select`（→ `selectSql`）、
 `where`（→ `predicate`）、`run`（→ `execute`）、`from` / `into`（→ `source` / `target`）。
+層 1 で追加で踏んだ物: `alias`（→ `label`）、`and` / `or` / `not`（関数名にできない → `both` / `either` / `negate`）。
+未使用の型引数はエラーになる（ファントム型は `_row` と書けば通る。ただし他の case で参照する物は普通の名前で）。
 
 ## コメントの流儀
 

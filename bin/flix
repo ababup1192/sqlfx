@@ -4,17 +4,18 @@
 # 同梱していて手元の jdk と別マイナー版になるため。jar だけ借り、JRE は手元に固定する。
 ENGINE_ROOT="$HOME/Desktop/flix_game_engine"
 
-FLIX_JAR=""
+# FLIX_JAR を環境変数で渡せば devbox は要らない
+FLIX_JAR="${FLIX_JAR:-}"
 real="$(readlink -f "$ENGINE_ROOT/.devbox/nix/profile/default/bin/flix" 2>/dev/null)"
 case "$real" in
     /nix/store/*)
         jar="$(dirname "$(dirname "$real")")/share/java/flix/flix.jar"
-        if [ -f "$jar" ]; then FLIX_JAR="$jar"; fi
+        if [ -z "$FLIX_JAR" ] && [ -f "$jar" ]; then FLIX_JAR="$jar"; fi
         ;;
 esac
 
 if [ -z "$FLIX_JAR" ]; then
-    echo "flix.jar が見つかりません。$ENGINE_ROOT で devbox の profile を作ってください。" >&2
+    echo "flix.jar が見つかりません。FLIX_JAR=/path/to/flix.jar を渡すか、$ENGINE_ROOT で devbox の profile を作ってください。" >&2
     exit 127
 fi
 
@@ -30,4 +31,14 @@ fi
 # WhyNot: --Xsubeffecting=lambdas を外さないのは、これが無いと effect 無しのラムダを
 # `\ ef` の関数型（ハンドラに渡すコールバック等）に置けず、純粋な物全部に checked_ecast が要るため。
 # experimental なフラグなので、消えたら checked_ecast を規約に戻す。
-exec "$JAVA_CMD" -Xss32m -jar "$FLIX_JAR" "$@" --Xsubeffecting=lambdas
+# `run -- 引数...` のときは、フラグを `--` の前に置く（後ろに置くとプログラムの引数になる）。
+before=()
+after=()
+seen_dashdash=0
+for arg in "$@"; do
+    if [ "$seen_dashdash" = 1 ]; then after+=("$arg")
+    elif [ "$arg" = "--" ]; then seen_dashdash=1; after+=("$arg")
+    else before+=("$arg")
+    fi
+done
+exec "$JAVA_CMD" -Xss32m -jar "$FLIX_JAR" "${before[@]}" --Xsubeffecting=lambdas "${after[@]}"

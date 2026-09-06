@@ -56,3 +56,11 @@ Phase 0 のスパイクと、実装中に分かった Flix 0.75.3 の制約。�
 
 JDBC の往復（数十〜数百 µs）に比べて 2 桁小さいので、ハンドラを重ねる設計の性能リスクは無い。
 `runLogging` の増分は SQL とパラメータの文字列化がほとんど。
+
+## ハンドラ本体で投げたエフェクトはどこに届くか（2026-09-06）
+
+```flix
+run { Ok(run { inner() } with handler Op { def op(_k) = Fail.fail() }) } with handler Fail { def fail(_k) = Err("caught outside") }
+```
+`inner` の中で `Fail` を被せていても、`Op` のハンドラ本体で投げた `Fail` は **外側** に届く（`Err(caught outside)`）。
+ハンドラ本体は `run` の外側の文脈で評価される。なので JDBC ハンドラは失敗を値で継続に渡し、`Sql.*` が呼び出し側で op にする。

@@ -11,8 +11,8 @@
   予約語なので識別子に使わない（`.q` の `query` はファイル側の文法であって Flix の識別子ではない）
 - `\ SqlRead / SqlWrite` を持つ関数は薄く、ロジックは純粋関数へ（§9）。テストは DB 無しの層 1〜3 を厚くする
 - 実 PostgreSQL が要るテスト（層 5）は最後まで少数に留める。`bin/flix test` は `test/` の `@Test` を
-  全部走らせ、絞り込みが無いので、実 PG テストは `test-pg/` に置く。`make test-pg` がコンテナを立て、
-  `test/Pg/` へ写して回し、終わったら消してコンテナも止める。DSN が無ければ `bug!` で即落とす（黙って成功させない）
+  全部走らせ、絞り込みが無いので、`make test-unit` は build/unit/ に `test/Pg/` 抜きの写しを作って回し、`make test-pg` はコンテナを立てて全部回す。
+  `test/Pg/` を test/ の外に置かないのは、VSCode の Flix 拡張が src/ と test/ しか LSP に渡さないため。DSN が無ければ `bug!` で即落とす（黙って成功させない）
 
 ## フェーズ 0: 土台（今ここ）
 
@@ -47,7 +47,7 @@
 6. [x] **`withRetry`**: Transient を捕まえて thunk を呼び直す。枯渇で `DbErr.retryExhausted`。層 2 のテスト
 7. [x] **`withTx` の最小版**（§4.3）: 接続を固定したハンドラを被せる。ネストは未対応。
    `TransientDbErr` / `DbErr` が飛べば ROLLBACK して再送出。実 PG で COMMIT / ROLLBACK を確認済み
-8. [x] 層 5 のテスト `test-pg/TestJdbc.flix`: 型の往復 / INSERT → SELECT / unique 違反 → conflict / 無いテーブル → schemaMismatch。
+8. [x] 層 5 のテスト `test/Pg/TestJdbc.flix`: 型の往復 / INSERT → SELECT / unique 違反 → conflict / 無いテーブル → schemaMismatch。
    `make test-pg` がコンテナの起動から停止までやる
 9. [x] 多層ハンドラ（ログ → 計測 → インメモリ）の実行時間を 1 回測って `docs/spikes.md` に残した
 
@@ -56,22 +56,26 @@
 
 ## フェーズ 2: 層1 = v1（§3, §5）
 
-1. **`.q` パーサ**（`src/Q/`。Flix で書く。後で LSP の土台になる）
+1. [x] **`.q` パーサ**（`src/Q/QParser.flix`、AST は `QueryDef`）
    - `query 名前(引数) -> one | many | exec [keyed(col)] [with slot: 型, ...] { SQL }`
-   - `:name` の宣言と使用の対応検査
-   - 機械置換で完全な SQL に戻す（`:id` → `$1`、`{filter}` → `TRUE`）。この関数は純粋でスナップショットテスト
-2. **スキーマ解決**: `migrations/*.sql` から机上のスキーマを組み、名前・型を解決する
-   - DDL のパースは最小（CREATE TABLE / ALTER TABLE ADD/DROP COLUMN / CREATE INDEX）。それ以外は「読めない DDL」として警告
-3. **codegen**: 型付き関数（`\ SqlRead` / `\ SqlWrite` を文の種類から自動付与）+ デコーダを出力
-   - 生成器は**同じプロジェクトの `main` サブコマンド**（`bin/flix run -- gen queries/ test/Example/Gen/`）。
-     `flix.toml` の依存は GitHub 参照だけでローカルパス依存が無く、別プロジェクトにすると
-     `.q` パーサをコピーするか本体を publish しないと使えないため
-   - 生成物は `test/Example/Gen/` に隔離する（本体 `src/` には入れない）
-   - 生成物には `.q` と生成器バージョンのハッシュを埋め、テストと起動時に照合する
-4. **断片 DSL の最小版**: `Col[row, a]` / `Pred[row]` / `Order[row]`、演算子は `.==` `.>` `like` `isNull` `in` `and` `or` `when`
-   - render は (SQL, パラメータ列) のペアを返す再帰。括弧は全付け。識別子は `Col` 経由のみ
-   - `RawSql` エフェクトでエスケープハッチを標識化
-5. **CI 検証**: 実 PG に全 `.q` を `PREPARE`（実行なし）
+   - `:name` の宣言と使用の対応検査（未宣言・未使用・slot も同様・keyed は many だけ・同名禁止）
+   - 機械置換で完全な SQL に戻す（`QRender.toSql`: `:id` → `$1`、`{filter}` → `TRUE`、`{order}` → 空）
+2. [x] **スキーマ解決**（`Schema` / `DdlParser` / `QResolve`）: `migrations/*.sql` から机上のスキーマを組み、SELECT リストの列を名前・型・NULL 可否まで決める
+   - DDL は CREATE TABLE / DROP TABLE / ALTER TABLE（ADD|DROP COLUMN、ALTER COLUMN の NOT NULL・TYPE、RENAME COLUMN）を読む。制約と CREATE INDEX は無視、それ以外は警告
+   - 式の列は `expr::type AS name` の形だけ（型推論はしない）。LEFT / FULL JOIN の相手は NULL 可
+3. [x] **codegen**（`Codegen` + `src/Main.flix` の `gen` サブコマンド、`make gen`）
+   - クエリごとに行レコード + デコーダ（forA）+ 型付き関数（`one` → `Option[Row] \ {SqlRead, DbErr}`、`exec` → `Int32 \ SqlWrite`、RETURNING 付きの書き込みは `\ {SqlWrite, DbErr}`）
+   - テーブルごとに断片 DSL 用の `Col` 定義（`Tables.flix`）
+   - 生成物に `.q` のハッシュ（`sourceHash`）を埋め、テストで現物と照合する
+4. [x] **断片 DSL の最小版**（`Fragment`）: `Col[row, a]` / `Pred[row]` / `Order[row]`、
+   `eq ne lt le gt ge like isNull isNotNull inList both either negate when all` / `asc desc then`
+   - render は (SQL, パラメータ列) を返す再帰。括弧は全付け。`$n` は本文の引数の続き番号
+   - `RawSql` エフェクトで生 SQL を標識化（`Fragment.rawPred`、`RawSql.runWithAllow`）
+5. [ ] **CI 検証**: 実 PG に全 `.q` を `PREPARE`（実行なし）
+6. [x] デモプロジェクト `examples/blog/`（flix.toml 付きの独立プロジェクト。migrations + .q + 生成物 + ユースケース、
+   生成コード版と生 SQL 版の 2 系統で DB 無し / 実 PG のテスト。本体は `make vendor` で src/flix_db/ に写す）
+
+残り: 5。`keyed` からの preloader 生成はフェーズ 3。
 
 ## フェーズ 3: 層2 = v2（§4.3, §6）
 
@@ -116,12 +120,11 @@
 src/Db/           層0: SqlValue / Row / Decoder / Sql（eff）/ DbError / Retry / Tx（モジュールはトップレベルに平ら）
 src/Db/Jdbc/      JDBC ハンドラ（腐敗防止層）
 src/Db/Test/      テストハンドラ 3 種（本体に同梱。利用側のテストで使う）
-src/Q/            層1: .q パーサ / スキーマ解決 / 断片 DSL / 生成器
+src/Q/            層1: .q パーサ（QParser）/ スキーマ解決（Schema, DdlParser, QResolve）/ 断片 DSL（Fragment）/ 生成器（Codegen）
+src/Main.flix     `gen` サブコマンド（bin/flix run -- gen <migrations> <queries> <out>）
 src/Db/Migrate/   層2〜: マイグレーション
-test/Example/     使い方の見本（`mod ExampleUsers`。ユースケース関数のシグネチャがドキュメントになる）
-test/Example/Gen/ 生成物（隔離）
-migrations/       サンプルの DDL
-queries/          サンプルの .q
+test/Example/     層0 だけの小さな見本（`mod ExampleUsers`）
+examples/blog/    デモプロジェクト（独立。examples/blog/README.md）
 test/             src と同じ構成。DB 無しで回る
-test-pg/          実 PG が要るテスト。make test-pg が test/Pg/ へ写して回す
+test/Pg/          実 PG が要るテスト。make test-unit は build/unit/ に Pg 抜きの写しを作って回す
 ```

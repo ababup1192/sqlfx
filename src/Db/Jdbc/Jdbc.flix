@@ -7,6 +7,8 @@ mod Jdbc {
     import java.sql.PreparedStatement
     import java.sql.ResultSet
     import java.sql.SQLException
+    import org.postgresql.util.PSQLException
+    import org.postgresql.util.ServerErrorMessage
     import java.util.Properties
     import org.postgresql.Driver
 
@@ -52,15 +54,29 @@ mod Jdbc {
 
     ///
     /// 1 本の接続で fetch / execute を実行する。結果は即時 materialize する。
-    /// 継続は必ず 1 回だけ呼ぶ（成功なら結果を渡し、失敗ならエラー op を投げて呼ばない）。
+    /// 失敗は値（DbErrorKind）で継続に渡し、呼び出し側の `Sql.*` が op にする。継続は必ず 1 回呼ぶ。
     ///
-    pub def runWithConnection(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def runWithConnection(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + IO =
         run {
             thunk()
         } with handler SqlRead {
-            def fetch(sql, params, resume) = resume(fetchRows(conn, sql, params))
+            def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> fetchRows(conn, sql, params)))
         } with handler SqlWrite {
-            def execute(sql, params, resume) = resume(executeStatement(conn, sql, params))
+            def execute(sql, params, resume) = resume(DbError.runWithKind(() -> executeStatement(conn, sql, params)))
+            def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> fetchRows(conn, sql, params)))
+        }
+
+    ///
+    /// 接続を開いて thunk を走らせ、成功でも失敗でも必ず閉じる。失敗はそのまま再送出する。
+    /// 「開く → runWithConnection → 閉じる」を毎回書かないための入口。Tx が要るなら thunk の中で `Tx.withTx` を呼ぶ。
+    ///
+    pub def withConnection(config: ConnectionConfig, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        let conn = connect(config);
+        let outcome = DbError.runWithKind(() -> runWithConnection(conn, () -> thunk(conn)));
+        close(conn);
+        match outcome {
+            case Ok(value) => value
+            case Err(kind) => DbError.raise(kind)
         }
 
     ///
@@ -116,12 +132,12 @@ mod Jdbc {
         }
 
     ///
-    /// `$n` を `?` に書き換える。params に無い `$n` を参照していたら DbErr.corrupt（SQL の書き間違い）。
+    /// `$n` を `?` に書き換える。params に無い `$n` を参照していたら DbErr.other（SQL の書き間違い）。
     ///
     def rewriteOrFail(sql: String, params: List[SqlValue]): (String, List[SqlValue]) \ DbErr =
         match JdbcConvert.rewritePlaceholders(sql, params) {
             case Some(rewritten) => rewritten
-            case None => DbErr.corrupt("placeholder out of range (${List.length(params)} params): ${sql}")
+            case None => DbErr.other("placeholder out of range (${List.length(params)} params): ${sql}")
         }
 
     ///
@@ -132,6 +148,23 @@ mod Jdbc {
         let message: String = e.getMessage();
         let safeState = if (Object.isNull(state)) "" else state;
         let safeMessage = if (Object.isNull(message)) "" else message;
-        DbError.raise(SqlState.classify(safeState, safeMessage))
+        DbError.raise(SqlState.classifyWith({ sqlState = safeState, message = safeMessage, constraint = serverConstraint(e) }))
+
+    ///
+    /// pgjdbc の例外ならサーバが返した制約名を取り出す。それ以外の SQLException や、制約の無いエラーは None。
+    ///
+    def serverConstraint(e: SQLException): Option[String] \ IO =
+        let className: String = e.getClass().getName();
+        if (className != "org.postgresql.util.PSQLException")
+            None
+        else {
+            let psql: PSQLException = unchecked_cast(e as PSQLException);
+            let server: ServerErrorMessage = psql.getServerErrorMessage();
+            if (Object.isNull(server)) None
+            else {
+                let constraint: String = server.getConstraint();
+                if (Object.isNull(constraint)) None else Some(constraint)
+            }
+        }
 
 }

@@ -107,7 +107,7 @@ pub eff DbErr {                  // 再実行しても直らない DB エラー
     def schemaMismatch(detail: String): Void
     def decodeError(column: String, detail: String): Void
     def retryExhausted(last: String): Void
-    def corrupt(detail: String): Void
+    def other(detail: String): Void
 }
 pub type alias Db = { SqlRead, SqlWrite, TransientDbErr, DbErr }
 ```
@@ -146,6 +146,7 @@ searchUsers(50,
 ```
 
 - `Col[row, a]` はファントム型付きカラム値(codegen が吐く)。文字列カラム名は書かない
+- 実装では `and` / `or` / `not` が Flix の予約語なので `both` / `either` / `negate`。`by` は `asc` / `desc` / `then`（`docs/layer1.md`）
 - `Pred[users]` 型で「どのテーブルの列を参照できる断片か」を宣言
 - 値は必ず `EParam` ノード → プレースホルダへ。識別子は Col 経由のみ =
   **SQLインジェクションが構造的に不可能**(動的識別子は自然と許可リスト化)
