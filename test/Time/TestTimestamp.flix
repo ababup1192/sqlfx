@@ -32,7 +32,7 @@ def testArithmetic(): Unit \ Assert =
          Time.Duration.toSeconds(Timestamp.between(base, base |> Timestamp.plus(Time.Duration.days(7)))),
          Timestamp.toEpochMillis(base)))
 
-/// toCivil は TimeZone のゾーンで暦を読む。同じ瞬間でも東京と UTC で日付が変わる。
+/// toCivil は TimeZone のゾーンで暦を読む。同じ瞬間でも東京と UTC で日付が変わる（この 1 本だけハンドラを 2 つ置く）。
 ///
 ///   2026-09-05T20:00:00Z → 東京 9/6 05:00 / UTC 9/5 20:00
 @Test
@@ -44,16 +44,22 @@ def testToCivilDependsOnZone(): Unit \ Assert =
         expected = (("2026-09-06", 5), ("2026-09-05", 20)),
         ((Date.toIso8601(inTokyo#date), inTokyo#hour), (Date.toIso8601(inUtc#date), inUtc#hour)))
 
-/// fromCivil は toCivil の逆。夏時間の隙間（ニューヨーク 2026-03-08 02:30）は None。
+/// fromCivil は toCivil の逆。東京の 9/6 10:30 は UTC の 01:30。
 @Test
 def testFromCivil(): Unit \ Assert =
-    let newYork = Zone.fromName("America/New_York") |> Option.getWithDefault(Zone.utc());
     let civil = { date = Date.fromYmd({ year = 2026, month = 9, day = 6 }) |> Option.getWithDefault(Date.fromEpochDay(0)), hour = 10, minute = 30, second = 0, micro = 0 };
+    run {
+        Assert.assertEq(expected = Some("2026-09-06T01:30:00Z"), Timestamp.fromCivil(civil) |> Option.map(Timestamp.toIso8601))
+    } with TimeZone.runWith(tokyo())
+
+/// 夏時間の隙間（ニューヨーク 2026-03-08 02:30 は存在しない）は None。
+@Test
+def testFromCivilInDstGap(): Unit \ Assert =
+    let newYork = Zone.fromName("America/New_York") |> Option.getWithDefault(Zone.utc());
     let gap = { date = Date.fromYmd({ year = 2026, month = 3, day = 8 }) |> Option.getWithDefault(Date.fromEpochDay(0)), hour = 2, minute = 30, second = 0, micro = 0 };
-    Assert.assertEq(
-        expected = (Some("2026-09-06T01:30:00Z"), None),
-        (run { Timestamp.fromCivil(civil) |> Option.map(Timestamp.toIso8601) } with TimeZone.runWith(tokyo()),
-         run { Timestamp.fromCivil(gap) } with TimeZone.runWith(newYork)))
+    run {
+        Assert.assertEq(expected = None, Timestamp.fromCivil(gap))
+    } with TimeZone.runWith(newYork)
 
 /// format は全トークンをゾーン込みで出す。
 ///
@@ -66,17 +72,26 @@ def testFormatTokens(): Unit \ Assert =
         Format.Hour2, Format.Text(":"), Format.Minute2, Format.Text(":"), Format.Second2, Format.Text("."), Format.Millis3, Format.Text(" "),
         Format.MonthName, Format.Text(" "), Format.Weekday, Format.Text(" "), Format.ZoneName, Format.Text(" "), Format.Offset
     };
-    Assert.assertEq(
-        expected = ("2026-09-06 10:02:03.456 September Sunday JST +09:00", "2026-09-06 01:02", "+00:00"),
-        (run { Timestamp.format(tokens, t) } with TimeZone.runWith(tokyo()),
-         run { Timestamp.format(Format.iso8601Minute(), t) } with TimeZone.runWith(Zone.utc()),
-         run { Timestamp.format(List#{Format.Offset}, t) } with TimeZone.runWith(Zone.utc())))
+    run {
+        Assert.assertEq(expected = "2026-09-06 10:02:03.456 September Sunday JST +09:00", Timestamp.format(tokens, t))
+    } with TimeZone.runWith(tokyo())
+
+/// UTC では offset が Z でなく +00:00 に揃う。iso8601Minute の定数も確かめる。
+@Test
+def testFormatInUtc(): Unit \ Assert =
+    let t = at("2026-09-06T01:02:03.456Z");
+    run {
+        Assert.assertEq(
+            expected = ("2026-09-06 01:02", "+00:00"),
+            (Timestamp.format(Format.iso8601Minute(), t), Timestamp.format(List#{Format.Offset}, t)))
+    } with TimeZone.runWith(Zone.utc())
 
 /// runFrozen は now と today を止める。今が 2026-09-05T20:00:00Z なら、東京の今日は 9/6。
 @Test
 def testRunFrozen(): Unit \ Assert =
-    let (now, today) = run { (Timestamp.now(), Date.today()) } with TimeTest.runFrozen({ now = "2026-09-05T20:00:00Z", zone = tokyo() });
-    Assert.assertEq(expected = ("2026-09-05T20:00:00Z", "2026-09-06"), (Timestamp.toIso8601(now), Date.toIso8601(today)))
+    run {
+        Assert.assertEq(expected = ("2026-09-05T20:00:00Z", "2026-09-06"), (Timestamp.toIso8601(Timestamp.now()), Date.toIso8601(Date.today())))
+    } with TimeTest.runFrozen({ now = "2026-09-05T20:00:00Z", zone = tokyo() })
 
 /// 無いゾーン名は None。
 @Test
