@@ -21,6 +21,19 @@ query insertUser(name: String, email: String, role: String) -> one {
     INSERT INTO users (name, email, role) VALUES (:name, :email, :role) RETURNING id
 }
 
+// UPSERT。email が既にあれば name と role を上書きして、その id を返す
+query upsertUser(name: String, email: String, role: String) -> one {
+    INSERT INTO users (name, email, role) VALUES (:name, :email, :role)
+    ON CONFLICT ON CONSTRAINT users_email_key DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role
+    RETURNING id
+}
+
+// 既にあれば何もしない。影響行数は 0
+query insertUserIfAbsent(name: String, email: String, role: String) -> exec {
+    INSERT INTO users (name, email, role) VALUES (:name, :email, :role)
+    ON CONFLICT (email) DO NOTHING
+}
+
 query renameUser(id: Int64, name: String) -> exec {
     UPDATE users SET name = :name WHERE id = :id
 }

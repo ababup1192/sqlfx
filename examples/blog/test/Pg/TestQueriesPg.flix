@@ -169,6 +169,24 @@ def testPartialUpdate(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     });
     Assert.assertEq(expected = Ok((1, Some(("Renamed", true)), 0, 1, Some(None))), result)
 
+/// UPSERT: 同じ email で 2 回目は INSERT でなく UPDATE になり、id は同じで name が変わる。
+/// ON CONFLICT で吸収された違反は制約翻訳（onConstraint）に来ない。DO NOTHING は影響行数 0。
+///
+///   upsertUser(alice, "Alice A.") → alice の id、findUser は Alice A.
+///   insertUserIfAbsent(alice) → 0 / insertUserIfAbsent(erin) → 1
+@Test
+def testUpsert(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let result = BlogTestSupport.withSeed(() -> {
+        let alice = BlogTestSupport.userIdOf("alice@example.com");
+        let upserted = UsersTable.onConstraint(constraint -> bug!("translated ${constraint}"), () ->
+            UsersQueries.upsertUser({ name = "Alice A.", email = "alice@example.com", role = "admin" }) |> Option.map(row -> row#id));
+        let renamed = alice |> Option.flatMap(UsersQueries.findUser) |> Option.map(row -> row#name);
+        let skipped = UsersQueries.insertUserIfAbsent({ name = "alice", email = "alice@example.com", role = "member" });
+        let added = UsersQueries.insertUserIfAbsent({ name = "erin", email = "erin@example.com", role = "member" });
+        (upserted == alice, renamed, skipped, added)
+    });
+    Assert.assertEq(expected = Ok((true, Some("Alice A."), 0, 1)), result)
+
 /// insertPost（RETURNING）と deletePostsOfUser: 返った id で読め、消した後は無い。
 ///
 ///   insertPost(carol) → id 4 / postsByUsers([3]) は 1 件 / deletePostsOfUser(3) → 1 行 / その後 0 件

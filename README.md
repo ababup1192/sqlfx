@@ -119,6 +119,8 @@ query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pre
 引数の型は Flix の綴り: `Bool Int32 Int64 Float64 BigDecimal String Bytes Timestamp Date Uuid Json List[Int64] List[String]`。
 `Timestamp` / `Date` / `Uuid` / `Json` は生成コードでも同じ名前の型になる（§5 の「日時と JSON」）。
 
+UPSERT（`INSERT ... ON CONFLICT DO UPDATE SET ... RETURNING id`）もそのまま書ける。`ON CONFLICT` で吸収された違反は `onConstraint` に来ない。
+
 バリエーション:
 
 ```
