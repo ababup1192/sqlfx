@@ -67,6 +67,8 @@
    - クエリごとに行レコード + デコーダ（forA）+ 型付き関数（`one` → `Option[Row] \ {SqlRead, DbErr}`、`exec` → `Int32 \ SqlWrite`、RETURNING 付きの書き込みは `\ {SqlWrite, DbErr}`）
    - テーブルごとに断片 DSL 用の `Col` 定義と、制約の enum + `onConstraint`（`Tables.flix`）
    - 生成物に `.q` のハッシュ（`sourceHash`）を埋め、テストで現物と照合する
+3b. [x] **意味を持つ型**（`src/Time/`, `src/Uuid/`）: `Timestamp` / `Date` / `Zone` + `TimeZone` エフェクト / `Format` トークン / `TimeTest.runFrozen`、
+   `Uuid`、JSON は標準ライブラリの `Util.Json`。生成コードと `Decoder` がこれらの型で返す（gen v6）
 4. [x] **断片 DSL の最小版**（`Fragment`）: `Col[row, a, n]` / `Pred[row]` / `Order[row]` / `Changes[row]`、
    `=== =!= << <<= >> >>= like isNull isNotNull inList both either negate when all` / `asc desc thenAsc thenDesc` / `set setNull setIfSome setOrNull increment rawSet`
    - render は (SQL, パラメータ列) を返す再帰。括弧は全付け。`$n` は本文の引数の続き番号

@@ -19,7 +19,7 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "5"
+    pub def version(): String = "6"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
@@ -165,7 +165,7 @@ mod Codegen {
         let signature = List.append(paramDecls, slotDecls) |> List.join(", ");
         let paramRef = name -> if (useRecord) "args#${name}" else name;
         let baseParams = orderedNames
-            |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> "${SqlType.sqlValueCase(param#paramType)}(${paramRef(param#name)})") |> Option.getWithDefault(""))
+            |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> "${SqlType.wrapFunction(param#paramType)}(${paramRef(param#name)})") |> Option.getWithDefault(""))
             |> (values -> if (List.isEmpty(values)) "Nil" else "List#{${List.join(", ", values)}}");
         let decoder = "${queryDef#name}Decoder()";
         let (resultType, effects, statement) = match (queryDef#shape, resolved#writes) {
@@ -298,7 +298,7 @@ mod Codegen {
         let moduleName = tableModuleOf(table#name);
         let cols = table#columns
             |> List.filterMap(column -> column#columnType |> Option.map(sqlType ->
-                "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}, ${nullabilityMarker(column#nullable)}] = Fragment.Col.Col(${flixString(column#name)}, ${SqlType.sqlValueCase(sqlType)})"));
+                "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}, ${nullabilityMarker(column#nullable)}] = Fragment.Col.Col(${flixString(column#name)}, ${SqlType.wrapFunction(sqlType)})"));
         renderConstraints(table) |> Result.map(constraints -> List.join("\n", List#{
             "///",
             "/// ${table#name} テーブル。enum は断片 DSL の型に付ける印、関数は列。",

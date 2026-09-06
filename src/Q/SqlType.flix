@@ -47,10 +47,10 @@ mod SqlType {
         case SqlType.Decimal => { flixName = "BigDecimal", pgNames = List#{"numeric", "decimal"}, flixType = "BigDecimal" }
         case SqlType.Str => { flixName = "String", pgNames = List#{"text", "varchar", "character varying", "character", "char", "citext"}, flixType = "String" }
         case SqlType.Bytes => { flixName = "Bytes", pgNames = List#{"bytea"}, flixType = "Vector[Int8]" }
-        case SqlType.Timestamp => { flixName = "Timestamp", pgNames = List#{"timestamp", "timestamptz", "timestamp with time zone", "timestamp without time zone"}, flixType = "Int64" }
-        case SqlType.Date => { flixName = "Date", pgNames = List#{"date"}, flixType = "Int32" }
-        case SqlType.Uuid => { flixName = "Uuid", pgNames = List#{"uuid"}, flixType = "String" }
-        case SqlType.Json => { flixName = "Json", pgNames = List#{"json", "jsonb"}, flixType = "String" }
+        case SqlType.Timestamp => { flixName = "Timestamp", pgNames = List#{"timestamp", "timestamptz", "timestamp with time zone", "timestamp without time zone"}, flixType = "Timestamp.Timestamp" }
+        case SqlType.Date => { flixName = "Date", pgNames = List#{"date"}, flixType = "Date.Date" }
+        case SqlType.Uuid => { flixName = "Uuid", pgNames = List#{"uuid"}, flixType = "Uuid.Uuid" }
+        case SqlType.Json => { flixName = "Json", pgNames = List#{"json", "jsonb"}, flixType = "Util.Json.Json" }
         case SqlType.Int64Array => { flixName = "List[Int64]", pgNames = List#{"bigint[]", "int8[]"}, flixType = "List[Int64]" }
         case SqlType.StrArray => { flixName = "List[String]", pgNames = List#{"text[]", "varchar[]"}, flixType = "List[String]" }
     }
@@ -80,8 +80,15 @@ mod SqlType {
         "Decoder." + String.toLowerCase(String.takeLeft(1, caseName)) + String.dropLeft(1, caseName)
 
     ///
-    /// 生成コードで値を SqlValue に包む case の名前（`SqlValue.Int64Array`）。
+    /// 生成コードで値を SqlValue に包む関数の名前。基本型は case そのもの（`SqlValue.Int64Array`）、
+    /// 意味を持つ型は中身を取り出す関数（`SqlValue.ofTimestamp`）。関数値としても呼び出しとしても使える。
     ///
-    pub def sqlValueCase(sqlType: SqlType): String = "SqlValue." + ToString.toString(sqlType)
+    pub def wrapFunction(sqlType: SqlType): String = match sqlType {
+        case SqlType.Timestamp => "SqlValue.ofTimestamp"
+        case SqlType.Date => "SqlValue.ofDate"
+        case SqlType.Uuid => "SqlValue.ofUuid"
+        case SqlType.Json => "SqlValue.ofJson"
+        case _ => "SqlValue." + ToString.toString(sqlType)
+    }
 
 }

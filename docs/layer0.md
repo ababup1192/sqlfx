@@ -33,6 +33,8 @@ Decoder（純粋）  Row -> Result[DecodeError, a]
 | `src/Db/SqlValue.flix` | `enum SqlValue`。行き（プレースホルダ）と帰り（セル）の両方 |
 | `src/Db/Row.flix` | `Row` / `ColumnIndex` / `Statement` |
 | `src/Db/Decoder.flix` | `Decoder[a]` と組み合わせ関数 |
+| `src/Time/*.flix` | `Timestamp`（UTC の瞬間）/ `Date`（暦日）/ `Zone` + `eff TimeZone` / `Format` トークン / `TimeTest.runFrozen`。DB の層に依存しない |
+| `src/Uuid/Uuid.flix` | `Uuid`。`fromString` は `Option`、`random` は `NonDet` |
 | `src/Db/Sql.flix` | `eff SqlRead` / `eff SqlWrite` |
 | `src/Db/DbError.flix` | `eff TransientDbErr` / `eff DbErr` / `enum DbErrorKind` / `enum DbFailure` |
 | `src/Db/Retry.flix` | `Retry.withRetry` |
@@ -99,8 +101,12 @@ pub enum DecodeError with Eq, ToString {
     case MissingColumn(String)               // 列が結果セットに無い
     case TypeMismatch(String, String, String) // 列名, 期待した型, 実際の型
     case UnexpectedNull(String)
+    case InvalidJson(String, String)         // 列名, 理由。TEXT 列を Json と宣言したときに出る
 }
 ```
+
+`timestamp` / `date` / `uuid` は `Timestamp.Timestamp` / `Date.Date` / `Uuid.Uuid` で返し、`json` は `Util.Json.Json` に parse する（`jsonAs` は `FromJson` の型へ、`jsonText` は素の文字列）。
+`SqlValue` の中身は変えず、`SqlValue.ofTimestamp` 等で包む。生成コードの型と `Fragment.Col` も同じ型を使う。
 
 組み合わせ関数（全部純粋。`Decoder` モジュール）:
 

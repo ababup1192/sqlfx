@@ -33,6 +33,13 @@ mod SqlValue {
         case StrArray(List[String])
     }
 
+    // ---- 意味を持つ型からの包み。生成コードと Col が使う ----
+
+    pub def ofTimestamp(t: Timestamp.Timestamp): SqlValue = SqlValue.Timestamp(Timestamp.toEpochMicros(t))
+    pub def ofDate(d: Date.Date): SqlValue = SqlValue.Date(Date.toEpochDay(d))
+    pub def ofUuid(u: Uuid.Uuid): SqlValue = SqlValue.Uuid(Uuid.toText(u))
+    pub def ofJson(j: Util.Json.Json): SqlValue = SqlValue.Json(Util.Json.toCompactString(j))
+
     ///
     /// デコーダのエラーメッセージに出す型名。
     ///

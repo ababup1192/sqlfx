@@ -117,6 +117,7 @@ query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pre
 | `-> exec` | `Int32`（影響行数） | `RETURNING` 無しの INSERT / UPDATE / DELETE |
 
 引数の型は Flix の綴り: `Bool Int32 Int64 Float64 BigDecimal String Bytes Timestamp Date Uuid Json List[Int64] List[String]`。
+`Timestamp` / `Date` / `Uuid` / `Json` は生成コードでも同じ名前の型になる（§5 の「日時と JSON」）。
 
 バリエーション:
 
@@ -300,7 +301,7 @@ def countPosts(): Int64 \ DbRead + RawSql =
 | `Sql.execute` | 影響行数 `Int32` | `DbWrite + RawSql` |
 | `Sql.executeReturningAs` / `executeReturningOneAs` | RETURNING の行をデコードした値 | `DbWrite + RawSql` |
 
-デコードに失敗すると `DbErr.decodeError` が上がる。列が無い、型が違う、NULL 不可の列が NULL、の 3 種類で、静かに壊れない。
+デコードに失敗すると `DbErr.decodeError` が上がる。列が無い、型が違う、NULL 不可の列が NULL、JSON として読めない、の 4 種類で、静かに壊れない。
 
 値の型は `SqlValue` の 1 つの enum で、行きも帰りも同じ:
 
@@ -323,6 +324,30 @@ def main(): Unit \ IO =
 ```
 
 `RawSql` は防止のための物ではなく、責任の所在を示す物。書ける SQL は変わらない。生 SQL を使う関数は効果を明示して書く（書き忘れると純粋な関数と見なされ、本体で `Sql.*` を呼んだ時点でコンパイルエラーになる）。
+
+### 日時と JSON
+
+列の値は生の `Int64` や `String` でなく、意味を持つ型で出てくる。`TIMESTAMPTZ` は `Timestamp`（UTC の瞬間）、`DATE` は `Date`（暦日）、`UUID` は `Uuid`、`JSON` / `JSONB` は標準ライブラリの `Util.Json.Json`。
+中身は `SqlValue` のままなので、JDBC とテストハンドラは変わらない。
+
+```flix
+Timestamp.now() |> Timestamp.plus(Time.Duration.days(7))              // 1 週間後。now は Clock
+PostsTable.publishedAt() <<= Fragment.value(Timestamp.now())          // 断片 DSL でそのまま比較
+Timestamp.format(Format.iso8601Minute(), row#createdAt)               // "2026-09-06 10:00"。\ TimeZone
+Timestamp.toCivil(row#createdAt)#date                                 // その地域の暦日。\ TimeZone
+Date.fromYmd({ year = 2026, month = 2, day = 30 })                    // None。存在しない日は作れない
+
+run { render(posts) } with TimeZone.runWith(zone)                     // 境界で 1 回。zone は Zone.fromName("Asia/Tokyo") で作る
+TimeTest.runFrozen({ now = "2026-09-06T00:00:00Z", zone = Zone.utc() }, () -> Blog.publishDue())   // テストで時刻とゾーンを止める
+```
+
+- **瞬間と暦日は別の型**。`Timestamp` 同士の比較と算術は純粋。`Date` に落とす所だけ `TimeZone` が付く
+- **ゾーンは effect で差し込む**。表示の関数は引数にゾーンを持たず、型に `\ TimeZone` が出る。システム既定のゾーンを返す関数は無いので、`TimeZone.runWith` を書いた所で必ず明示的に決まる
+- **書式はトークンの List**（`Format.Year`, `Format.Month2`, `Format.Text("-")` …）。`yyyy` / `YYYY` の取り違えが型で消える。ISO 8601 は `toIso8601` / `fromIso8601`
+- JSON は `Decoder.json`（`Util.Json.Json`）か `Decoder.jsonAs`（`FromJson` のある型へ）。書くときは `ToJson` で `Json.Json` にして渡す。読めない JSON は `DecodeError.InvalidJson`
+- `Uuid.random()` は `NonDet`、`Uuid.fromString` は形を検証して `Option`
+
+`Timestamp` / `Date` / `Zone` / `TimeZone` / `Format` / `TimeTest` は `src/Time/`、`Uuid` は `src/Uuid/` にあり、DB の層に依存しない（切り出せる）。
 
 ## 6. エラーの扱い
 

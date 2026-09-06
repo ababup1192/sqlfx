@@ -50,8 +50,8 @@ mod Migrate {
     /// 1 ファイルの状態。`--status` の 1 行。
     ///
     pub enum Status with Eq, Order, ToString {
-        /// (version, 適用時刻の epoch マイクロ秒, かかった ms)
-        case Applied(String, Int64, Int32)
+        /// (version, 適用時刻, かかった ms)
+        case Applied(String, Timestamp.Timestamp, Int32)
         case Pending(String)
     }
 
@@ -68,7 +68,7 @@ mod Migrate {
     ///
     /// 記録テーブルの 1 行。
     ///
-    type alias Applied = { version = String, checksum = String, appliedAt = Int64, executionMs = Int32 }
+    type alias Applied = { version = String, checksum = String, appliedAt = Timestamp.Timestamp, executionMs = Int32 }
 
     /// advisory lock のキー。固定値。
     def lockKey(): Int64 = 8151602112i64

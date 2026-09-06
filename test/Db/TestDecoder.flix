@@ -154,3 +154,24 @@ def testRecoverKeepsTypeMismatchAsValue(): Unit \ Assert =
     Assert.assertEq(
         expected = (Ok(Err(DecodeError.TypeMismatch("views", "Int32", "Str"))), Err(DecodeError.UnexpectedNull("views")), Err(DecodeError.MissingColumn("views"))),
         (Decoder.decodeRow(decoder, broken), Decoder.decodeRow(decoder, nulled), Decoder.decodeRow(decoder, missing)))
+
+// ---- 意味を持つ型 ----
+
+/// timestamp / date / uuid は意味を持つ型で返る。json は parse し、壊れていれば InvalidJson。jsonAs は FromJson の型へ。
+///
+///   created_at = 2026-09-06T01:00:00Z / born = 2026-09-06 / meta = {"n": 1} / broken = "{"
+@Test
+def testSemanticTypes(): Unit \ Assert =
+    let row = Row.makeRows(
+        List#{"created_at", "born", "key", "meta", "broken"},
+        List#{List#{SqlValue.Timestamp(1788656400000000i64), SqlValue.Date(20702), SqlValue.Uuid("550e8400-e29b-41d4-a716-446655440000"), SqlValue.Json("{\"n\": 1}"), SqlValue.Json("{")}})
+        |> List.head
+        |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    Assert.assertEq(
+        expected = (Ok("2026-09-06T01:00:00Z"), Ok("2026-09-06"), Ok("550e8400-e29b-41d4-a716-446655440000"), Ok(Ok(1)), true, Ok("{\"n\":1}")),
+        (Decoder.decodeRow(Decoder.timestamp("created_at"), row) |> Result.map(Timestamp.toIso8601),
+         Decoder.decodeRow(Decoder.date("born"), row) |> Result.map(Date.toIso8601),
+         Decoder.decodeRow(Decoder.uuid("key"), row) |> Result.map(Uuid.toText),
+         Decoder.decodeRow(Decoder.json("meta"), row) |> Result.map(j -> Util.Json.FromJson.decodeAtKey("n", j) |> Result.map(n -> { let m: Int32 = n; m })),
+         Decoder.decodeRow(Decoder.json("broken"), row) |> Result.mapErr(Decoder.errorColumn) == Err("broken"),
+         Decoder.decodeRow(Decoder.json("meta"), row) |> Result.map(Util.Json.toCompactString)))

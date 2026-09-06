@@ -6,7 +6,7 @@ PG_ENV = SQLFX_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_TEST_USER=f
 
 # sqlfx 本体を src/sqlfx/ に写す（flix.toml がローカル依存を指せないため）
 vendor:
-	rm -rf src/sqlfx && mkdir -p src/sqlfx && cp -R ../../src/Db ../../src/Q src/sqlfx/
+	rm -rf src/sqlfx && mkdir -p src/sqlfx && cp -R ../../src/Db ../../src/Q ../../src/Time ../../src/Uuid src/sqlfx/
 
 # migrations と queries/*.q から src/Gen/ を作り直す（生成器は本体の main）
 gen:
