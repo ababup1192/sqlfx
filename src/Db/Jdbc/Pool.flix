@@ -96,41 +96,62 @@ mod Pool {
     /// SQL を 1 本も出さない thunk はプールに触らない。GraphQL のリゾルバのように「DB を使うかもしれない」単位を
     /// 1 つの Tx にしたい所で使う。ネストは `withTx` と同じく未対応。
     ///
-    /// WhyNot: Ref を region に閉じるのは、ハンドラのクロージャの中で借りた接続を持ち回る必要があり、
-    /// 継続をまたいで値を持てる物が Flix では region の Ref だけのため。
-    ///
     pub def withLazyTx(pool: Pool, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        withLazyTxAfterBegin(pool, () -> (), thunk)
+
+    ///
+    /// `withLazyTx` に加えて、BEGIN の直後（thunk の最初の SQL の前）に onBegin を同じ接続・同じ Tx で 1 回だけ流す。
+    /// `SELECT set_config('app.tenant', $1, true)` のように、Tx の間だけ効く印を置くのに使う。
+    /// SQL を出さない thunk では onBegin も呼ばれない（接続を借りないため）。
+    ///
+    /// WhyNot: 印を Tx の外（接続を借りた直後）で置かないのは、`set_config(..., true)` は Tx の終わりで消えるので
+    /// BEGIN の後でないと効かず、プールに返した接続へ印が残る事も無いため。
+    ///
+    pub def withLazyTxAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + (ef2 - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
         region rc {
             let slot = Ref.fresh(rc, None);
-            def conn() = match Ref.get(slot) {
-                case Some(open) => open
-                case None       => {
-                    let open = borrow(pool);
-                    Tx.begin(open);
-                    Ref.put(Some(open), slot);
-                    open
+            def open() = match Ref.get(slot) {
+                case Some(found) => found
+                case None        => {
+                    let found = borrow(pool);
+                    Tx.begin(found);
+                    Ref.put(Some(found), slot);
+                    // 印を置く SQL は開いたばかりの接続で流す（この時点で slot は埋まっているので、再帰しない）
+                    runOn(found, onBegin);
+                    found
                 }
             };
             let outcome = DbError.runWithKind(() ->
                 run thunk() with handler SqlRead {
-                    def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn(), sql, params)))
+                    def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
                 } with handler SqlWrite {
-                    def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(conn(), sql, params)))
-                    def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn(), sql, params)))
+                    def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(open(), sql, params)))
+                    def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
                 });
             let finished = match (Ref.get(slot), outcome) {
-                case (None, _)            => outcome
-                case (Some(open), Ok(_))  => {
-                    let committed = DbError.runWithKind(() -> Tx.commit(open));
-                    Jdbc.close(open);
+                case (None, _)             => outcome
+                case (Some(found), Ok(_))  => {
+                    let committed = DbError.runWithKind(() -> Tx.commit(found));
+                    Jdbc.close(found);
                     Result.flatMap(_ -> outcome, committed)
                 }
-                case (Some(open), Err(_)) => { Tx.rollback(open); Jdbc.close(open); outcome }
+                case (Some(found), Err(_)) => { Tx.rollback(found); Jdbc.close(found); outcome }
             };
             match finished {
                 case Ok(value) => value
                 case Err(kind) => DbError.raise(kind)
             }
+        }
+
+    ///
+    /// 決まった接続で thunk の SQL を流す（Tx の管理はしない）。
+    ///
+    def runOn(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        run thunk() with handler SqlRead {
+            def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn, sql, params)))
+        } with handler SqlWrite {
+            def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(conn, sql, params)))
+            def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn, sql, params)))
         }
 
 }

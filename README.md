@@ -82,6 +82,8 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 migrations の DDL から机上のスキーマを組み、`.q` の SELECT を当てて結果の列の名前・型・NULL 可否を決める。
 テーブルや列が無ければ生成時に止まる。生成物には `.q` のハッシュが入り、`gen --check` で「生成し忘れ」を検知できる。
+`gen --scope project_id` を付けると、`project_id` 列を持つ表を触る query に列の名前が無ければ生成を止める（マルチテナントの書き忘れ）。
+意図して跨ぐ query は直前の行に `// unscoped: 理由` と書く。
 
 ```bash
 make gen         # 生成する
@@ -464,6 +466,7 @@ Retry.withRetry(3, () ->                            // Transient なら thunk �
 ```
 
 `Pool.withLazyTx(pool, thunk)` は「最初の SQL が来た時に借りて BEGIN、終わったら COMMIT / ROLLBACK」。SQL を出さない thunk はプールに触らない。
+`Pool.withLazyTxAfterBegin(pool, onBegin, thunk)` は BEGIN の直後に onBegin を同じ Tx で 1 回流す。`SELECT set_config('app.project_id', $1, true)` のように RLS の印を置くのに使う。
 GraphQL のリゾルバのように、DB を使うかどうかが呼ぶまで分からない単位を 1 つの Tx にしたい所で使う。
 
 `Pool` は HikariCP を包んだ物。接続数の上限を超えた借り出しは `borrowTimeoutMs` 待って `TransientDbErr.timeout` になる。

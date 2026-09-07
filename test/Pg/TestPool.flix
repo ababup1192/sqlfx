@@ -71,3 +71,20 @@ def testPoolLazyTxRollsBackAndCommits(): Unit \ {Assert, IO} =
     }));
     Pool.close(pool);
     Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_email_key")), 0, 1)), result)
+
+/// onBegin は最初の SQL の前に同じ Tx で 1 回流れ、`set_config(..., true)` の印が thunk から見える。SQL を出さない thunk では流れない。
+///
+///   BEGIN  set_config('app.tenant', '7')  SELECT current_setting  → '7'
+///   （SQL 無し）                                                    → onBegin 未実行（カウンタ 0）
+@Test
+def testPoolLazyTxAfterBegin(): Unit \ {Assert, IO} =
+    let pool = smallPool(1000);
+    let stamp = () -> discard Sql.fetch("SELECT set_config('app.tenant', '7', true)", Nil);
+    let seen = RawSql.runWithAllow(() -> DbError.runWithFailure(() ->
+        Pool.withLazyTxAfterBegin(pool, stamp, () -> Sql.fetchOneAs(Decoder.str("tenant"), "SELECT current_setting('app.tenant', true) AS tenant", Nil))));
+    let afterwards = RawSql.runWithAllow(() -> DbError.runWithFailure(() ->
+        Pool.withLazyTx(pool, () -> Sql.fetchOneAs(Decoder.str("tenant"), "SELECT coalesce(current_setting('app.tenant', true), '') AS tenant", Nil))));
+    let counter = Ref.fresh(Static, 0);
+    let pure = DbError.runWithFailure(() -> Pool.withLazyTxAfterBegin(pool, () -> Ref.put(Ref.get(counter) + 1, counter), () -> 42));
+    Pool.close(pool);
+    Assert.assertEq(expected = (Ok(Some("7")), Ok(Some("")), Ok(42), 0), (seen, afterwards, pure, Ref.get(counter)))

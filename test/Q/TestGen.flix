@@ -5,6 +5,6 @@
 @Test
 def testExampleGeneratedFilesAreUpToDate(): Unit \ {Assert, IO, Fs.DirList.DirList, Fs.FileRead.FileRead} =
     let stale = run {
-        Gen.staleFiles({ migrations = "examples/blog/migrations", queries = "examples/blog/queries", out = "examples/blog/src/Gen" })
+        Gen.staleFiles({ migrations = "examples/blog/migrations", queries = "examples/blog/queries", out = "examples/blog/src/Gen", scope = None })
     } with Fs.ReadFile.runWithFileRead;
     Assert.assertEq(expected = Ok(Nil), stale)
