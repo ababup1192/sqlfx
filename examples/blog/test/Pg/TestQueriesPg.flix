@@ -18,6 +18,20 @@ def testFindUser(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
         None
     }), result)
 
+/// reviseUser: Option の引数は Some で値を、None で SQL の NULL を書く。NULL 可の列は読み戻すと None。
+///
+///   alice に Some("new@example.com") + Some(2026-09-06T01:00Z) → その値が入る
+///   同じ行に None + None                                       → 両方 NULL に戻る
+@Test
+def testReviseUserWritesOptionAsNull(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let at = Timestamp.at("2026-09-06T01:00:00Z");
+    let result = BlogTestSupport.withSeed(() -> {
+        let written = UsersQueries.reviseUser({ id = 1i64, email = Some("new@example.com"), deletedAt = Some(at) });
+        let cleared = UsersQueries.reviseUser({ id = 1i64, email = None, deletedAt = None });
+        (written |> Option.map(row -> (row#email, row#deletedAt)), cleared |> Option.map(row -> (row#email, row#deletedAt)))
+    });
+    Assert.assertEq(expected = Ok((Some((Some("new@example.com"), Some(at))), Some((None, None)))), result)
+
 /// findUserByEmail: 退会済みでも email が合えば返る（deleted_at を見ない）。
 @Test
 def testFindUserByEmail(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =

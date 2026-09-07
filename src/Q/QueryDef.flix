@@ -41,8 +41,9 @@ mod QueryDef {
     ///
     /// - `name`: `:name` で参照する名前
     /// - `paramType`: 型
+    /// - `optional`: `.q` に `Option[T]` と書いた引数。生成コードは `Option[T]` を受け、None は SQL の NULL になる
     ///
-    pub type alias Param = { name = String, paramType = SqlType.SqlType }
+    pub type alias Param = { name = String, paramType = SqlType.SqlType, optional = Bool }
 
     ///
     /// `with` 節で宣言した slot 1 つ。

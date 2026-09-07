@@ -128,6 +128,39 @@ query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pre
 
 引数の型は Flix の綴り: `Bool Int32 Int64 Float64 BigDecimal String Bytes Timestamp Date Uuid Json List[Int64] List[String]`。
 `Timestamp` / `Date` / `Uuid` / `Json` は生成コードでも同じ名前の型になる（§5 の「日時と JSON」）。
+どの型も `Option[T]` で包める（`Option[String]` `Option[Timestamp]`）。包みの入れ子（`Option[Option[..]]`）は書けない。
+
+### NULL を渡す（`Option[T]`）
+
+NULL 可の列に「値か NULL か」を渡す引数は `Option[T]` と書く。生成された関数は `Option[T]` を受け、
+`Some(v)` はその値、`None` は型の付いた SQL の NULL（JDBC の `setNull`）になる。
+`nullif(:role, '')` や `nullif(:expiresAtMillis, 0)` のような**番兵は要らない**
+（番兵は「空文字」「1970-01-01」のような正しい値と NULL を区別できず、いつか必ず事故になる）。
+
+```
+query insertApiKey(name: String, role: Option[String], expiresAt: Option[Timestamp]) -> one {
+    INSERT INTO api_keys (name, role, expires_at) VALUES (:name, :role, :expiresAt) RETURNING id
+}
+```
+
+```flix
+ApiKeysQueries.insertApiKey({ name = "ci", role = Some("editor"), expiresAt = None })
+```
+
+**落とし穴: `WHERE col = :param` に NULL は引っかからない。** SQL の `=` は NULL と比べると真にならないので、
+`None` を渡すと 1 行も返らない（エラーにはならず、静かに 0 行）。これは SQL の意味そのもので、生成器は直さない。
+NULL の行も引きたいなら `IS NULL` 側を書く:
+
+```
+-- NG: :role が None なら 0 行
+WHERE role = :role
+
+-- OK: NULL 同士も一致とみなす
+WHERE role IS NOT DISTINCT FROM :role
+```
+
+述語（WHERE / ON / HAVING）の `= :param` / `<> :param` に `Option` の引数を置くと、`gen` が `warning:` を出す
+（生成は止めない）。`SET col = :param` は NULL を書く正しい書き方なので警告しない。
 
 UPSERT（`INSERT ... ON CONFLICT DO UPDATE SET ... RETURNING id`）もそのまま書ける。`ON CONFLICT` で吸収された違反は `onConstraint` に来ない。
 
@@ -318,9 +351,13 @@ def countPosts(): Int64 \ DbRead + RawSql =
 値の型は `SqlValue` の 1 つの enum で、行きも帰りも同じ:
 
 ```
-Null  Bool  Int32  Int64  Float64  Decimal(BigDecimal)  Str  Bytes
+Null  NullOf(NullType)  Bool  Int32  Int64  Float64  Decimal(BigDecimal)  Str  Bytes
 Timestamp(epoch µs, UTC)  Date(epoch day)  Uuid  Json  Int64Array  StrArray
 ```
+
+`Null` は型の付かない NULL（結果セットのセルはこれ）。`NullOf(NullType.Str)` は型の付いた NULL で、
+`setNull` に型が渡るので `col = $1` のように PG が型を決められない位置でも通る。
+生 SQL で `Option` を渡すときは `SqlValue.ofOption(SqlValue.NullType.Str, SqlValue.Str, value)`（`.q` の `Option[T]` はこれを吐く）。
 
 実行するには接続を開いて被せる。生 SQL を使う関数を呼ぶ境界では `RawSql.runWithAllow` で許可する。
 

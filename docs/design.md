@@ -66,6 +66,7 @@ query postsByUsers(ids: List[Int64]) -> many keyed(user_id) {
 設計判断:
 - `query 名前(引数) -> 形` はパーサが構文検査する第一級構造(書き忘れの黙殺が起きない)
 - パラメータは `:name` の名前参照。宣言と使用の対応をパース時に検査
+- パラメータの型は `Option[T]` で包める。`None` は型の付いた SQL の NULL(`setNull`)になり、`nullif(:x, '')` のような番兵を書かせない
 - 戻り形 `one / many / exec` が `Option[Row] / List[Row] / Int32` に対応
 - `keyed(col)` から preloader を生成
 - 動的部分だけ `{slot}` + `with` 節で型宣言(断片DSL、下記 §5)

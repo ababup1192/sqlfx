@@ -20,15 +20,33 @@ def testAsSameType(): Unit \ Assert =
 def testAsInt64WidensInt32(): Unit \ Assert =
     Assert.assertEq(expected = Some(7i64), SqlValue.asInt64(SqlValue.Int32(7)))
 
-/// isNull は Null だけ true。
+/// isNull は Null と NullOf が true。
 @Test
 def testIsNull(): Unit \ Assert =
-    Assert.assertEq(expected = (true, false), (SqlValue.isNull(SqlValue.Null), SqlValue.isNull(SqlValue.Str(""))))
+    Assert.assertEq(
+        expected = (true, true, false),
+        (SqlValue.isNull(SqlValue.Null), SqlValue.isNull(SqlValue.NullOf(SqlValue.NullType.Str)), SqlValue.isNull(SqlValue.Str(""))))
+
+/// ofOption: Some は wrap で包んだ値、None は型の付いた NULL。
+///
+///   Some("a") → Str("a") / None → NullOf(Str) / Some(Timestamp) → Timestamp(epoch micros)
+@Test
+def testOfOption(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{SqlValue.Str("a"), SqlValue.NullOf(SqlValue.NullType.Str), SqlValue.Timestamp(0i64), SqlValue.NullOf(SqlValue.NullType.Timestamp)},
+        List#{
+            SqlValue.ofOption(SqlValue.NullType.Str, SqlValue.Str, Some("a")),
+            SqlValue.ofOption(SqlValue.NullType.Str, SqlValue.Str, None),
+            SqlValue.ofOption(SqlValue.NullType.Timestamp, SqlValue.ofTimestamp, Some(Timestamp.fromEpochMicros(0i64))),
+            SqlValue.ofOption(SqlValue.NullType.Timestamp, SqlValue.ofTimestamp, None)
+        })
 
 /// typeName はエラーメッセージ用の型名を返す。
 @Test
 def testTypeName(): Unit \ Assert =
-    Assert.assertEq(expected = ("NULL", "Int64Array"), (SqlValue.typeName(SqlValue.Null), SqlValue.typeName(SqlValue.Int64Array(Nil))))
+    Assert.assertEq(
+        expected = ("NULL", "NULL", "Int64Array"),
+        (SqlValue.typeName(SqlValue.Null), SqlValue.typeName(SqlValue.NullOf(SqlValue.NullType.Int64)), SqlValue.typeName(SqlValue.Int64Array(Nil))))
 
 /// SqlValue は Eq を持つので、テストハンドラが記録したパラメータを比較できる。
 @Test

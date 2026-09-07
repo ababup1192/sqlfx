@@ -19,7 +19,7 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "6"
+    pub def version(): String = "7"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
@@ -158,14 +158,14 @@ mod Codegen {
         let useRecord = List.length(queryDef#params) >= 2;
         let paramDecls =
             if (useRecord)
-                List#{"args: { ${queryDef#params |> List.map(param -> "${param#name} = ${SqlType.toFlixType(param#paramType)}") |> List.join(", ")} }"}
+                List#{"args: { ${queryDef#params |> List.map(param -> "${param#name} = ${paramFlixType(param)}") |> List.join(", ")} }"}
             else
-                queryDef#params |> List.map(param -> "${param#name}: ${SqlType.toFlixType(param#paramType)}");
+                queryDef#params |> List.map(param -> "${param#name}: ${paramFlixType(param)}");
         let slotDecls = queryDef#slots |> List.map(slot -> "${slot#name}: ${slotFlixType(slot#kind, slot#table)}");
         let signature = List.append(paramDecls, slotDecls) |> List.join(", ");
         let paramRef = name -> if (useRecord) "args#${name}" else name;
         let baseParams = orderedNames
-            |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> "${SqlType.wrapFunction(param#paramType)}(${paramRef(param#name)})") |> Option.getWithDefault(""))
+            |> List.map(name -> queryDef#params |> List.find(param -> param#name == name) |> Option.map(param -> paramValue(param, paramRef(param#name))) |> Option.getWithDefault(""))
             |> (values -> if (List.isEmpty(values)) "Nil" else "List#{${List.join(", ", values)}}");
         let decoder = "${queryDef#name}Decoder()";
         let (resultType, effects, statement) = match (queryDef#shape, resolved#writes) {
@@ -199,6 +199,22 @@ mod Codegen {
                         "        ${call}"
                     }) |> skipWhenNoChanges(queryDef);
         List.join("\n", List.append(doc :: header :: body, List#{""}))
+
+    ///
+    /// 引数の Flix の型。`Option[T]` の引数は `Option` のまま受ける。
+    ///
+    def paramFlixType(param: QueryDef.Param): String =
+        let flixType = SqlType.toFlixType(param#paramType);
+        if (param#optional) "Option[${flixType}]" else flixType
+
+    ///
+    /// 引数を SqlValue に包む式。`Option` の引数は None が型の付いた NULL になる。
+    ///
+    def paramValue(param: QueryDef.Param, reference: String): String =
+        if (param#optional)
+            "SqlValue.ofOption(${SqlType.nullTypeValue(param#paramType)}, ${SqlType.wrapFunction(param#paramType)}, ${reference})"
+        else
+            "${SqlType.wrapFunction(param#paramType)}(${reference})"
 
     ///
     /// Changes の slot がどれか空なら、文を DB に出さずに 0 を返す形に本体を包む。

@@ -1,6 +1,6 @@
 ///
 /// 列と引数の型。`.q` の型名、PG の型名、SqlValue の case、生成する Flix の型を 1 か所で対応させる。
-/// 型を足すときは enum・`all`・`spec` の 3 か所（と SqlValue / Decoder / JdbcConvert の値側）。
+/// 型を足すときは enum・`all`・`spec` の 3 か所（と SqlValue の値と NullType / Decoder / JdbcConvert の値側と setNull の型）。
 ///
 mod SqlType {
 
@@ -90,5 +90,11 @@ mod SqlType {
         case SqlType.Json => "SqlValue.ofJson"
         case _ => "SqlValue." + ToString.toString(sqlType)
     }
+
+    ///
+    /// 生成コードで NULL に付ける型の綴り（`SqlValue.NullType.Str`）。`Option` の引数の None がこれになる。
+    /// case 名は SqlValue.NullType と揃えてあるので、対応表を 2 つ持たない。
+    ///
+    pub def nullTypeValue(sqlType: SqlType): String = "SqlValue.NullType." + ToString.toString(sqlType)
 
 }

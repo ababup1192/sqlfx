@@ -34,6 +34,12 @@ query insertUserIfAbsent(name: String, email: String, role: String) -> exec {
     ON CONFLICT (email) DO NOTHING
 }
 
+// NULL 可の列に Option で書く。Some はその値、None は SQL の NULL（'' や 0 の番兵が要らない）
+query reviseUser(id: Int64, email: Option[String], deletedAt: Option[Timestamp]) -> one {
+    UPDATE users SET email = :email, deleted_at = :deletedAt WHERE id = :id
+    RETURNING id, email, deleted_at
+}
+
 query renameUser(id: Int64, name: String) -> exec {
     UPDATE users SET name = :name WHERE id = :id
 }

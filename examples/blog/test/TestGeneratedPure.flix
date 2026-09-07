@@ -30,6 +30,23 @@ def testEditPostSendsOnlyTouchedColumns(): Unit \ Assert =
         expected = (Ok(1), List#{("UPDATE posts SET updated_at = now(), title = $2, published = $3 WHERE id = $1", List#{SqlValue.Int64(5i64), SqlValue.Str("t"), SqlValue.Bool(true)})}, Ok(0), 0),
         (affected, List.map(statement -> (statement#sql, statement#params), statements), skipped, List.length(none)))
 
+/// reviseUser: Option の引数は Some でその値、None で型の付いた NULL がプレースホルダに乗る。
+///
+///   { email = Some("a@example.com"), deletedAt = None } → $1 = Str, $2 = NullOf(Timestamp)
+///   { email = None, deletedAt = None }                  → $1 = NullOf(Str), $2 = NullOf(Timestamp)
+@Test
+def testReviseUserBindsOptionParams(): Unit \ Assert =
+    let boundParams = args -> DbTest.runRecording(Nil, 1, () -> DbError.runWithFailure(() -> UsersQueries.reviseUser(args)))
+        |> snd
+        |> List.flatMap(statement -> statement#params);
+    Assert.assertEq(
+        expected = (
+            List#{SqlValue.Str("a@example.com"), SqlValue.NullOf(SqlValue.NullType.Timestamp), SqlValue.Int64(1i64)},
+            List#{SqlValue.NullOf(SqlValue.NullType.Str), SqlValue.NullOf(SqlValue.NullType.Timestamp), SqlValue.Int64(1i64)}),
+        (
+            boundParams({ id = 1i64, email = Some("a@example.com"), deletedAt = None }),
+            boundParams({ id = 1i64, email = None, deletedAt = None })))
+
 /// registerUser: RETURNING の行が返れば id。DDL の制約違反は業務エラー（RegisterErr）に翻訳される。
 ///
 ///   users_email_key（unique）→ EmailTaken / users_name_length（check）→ NameTooLong

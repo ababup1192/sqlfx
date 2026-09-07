@@ -207,13 +207,14 @@ mod Gen {
             }, Schema.empty(), sqlFiles)
 
     ///
-    /// 1 つの .q → 1 つの .flix（出力先のパスと中身）。
+    /// 1 つの .q → 1 つの .flix（出力先のパスと中身）。QLint の注意書きは表示するだけで、生成は止めない。
     ///
-    def renderOne(schema: Schema.Schema, scope: Option[String], path: String, outDir: String): Result[String, (String, String)] \ Fs.ReadFile.ReadFile =
+    def renderOne(schema: Schema.Schema, scope: Option[String], path: String, outDir: String): Result[String, (String, String)] \ {IO, Fs.ReadFile.ReadFile} =
         let fileName = String.splitOn(substr = "/", path) |> List.last |> Option.getWithDefault(path);
         forM (
             source <- readFile(path);
             queries <- QParser.parseFile(source) |> Result.mapErr(e -> "${path}: ${e}");
+            _ <- Ok(List.forEach(warning -> println("warning: ${path}: ${warning}"), QLint.warnings(queries)));
             _ <- match scope {
                 case Some(column) => QScope.check(column, schema, source, queries) |> Result.mapErr(e -> "${path}: ${e}（テナントの列の条件が無い query。意図した物なら直前の行に `// unscoped: 理由` を書く）")
                 case None         => Ok(())

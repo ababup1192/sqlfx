@@ -64,6 +64,20 @@ def testBodyIgnoresQuotesAndCasts(): Unit \ Assert =
         |> Result.map(List.flatMap(queryDef -> queryDef#body));
     Assert.assertEq(expected = Ok(List#{Segment.Text("SELECT ':x', id::text FROM t WHERE id = "), Segment.ParamRef("id")}), body)
 
+/// `Option[T]` の引数は中身の型と「NULL を渡せる」印になる。素の型は今までどおり optional = false。
+///
+///   role: Option[String] / expiresAt: Option[Timestamp] / id: Int64
+@Test
+def testParseOptionParams(): Unit \ Assert =
+    let params = QParser.parseFile("query f(id: Int64, role: Option[String], expiresAt: Option[Timestamp]) -> exec "
+            + "{ UPDATE t SET role = :role, expires_at = :expiresAt WHERE id = :id }")
+        |> Result.map(List.flatMap(queryDef -> queryDef#params |> List.map(param -> (param#name, param#paramType, param#optional))));
+    Assert.assertEq(expected = Ok(List#{
+        ("id", SqlType.Int64, false),
+        ("role", SqlType.Str, true),
+        ("expiresAt", SqlType.Timestamp, true)
+    }), params)
+
 // ---- エラー ----
 
 /// 宣言と使用の食い違いは最初の 1 つで止まる。
@@ -90,18 +104,21 @@ def testReferenceErrors(): Unit \ Assert =
 
 /// 文法エラーは位置と期待した物を返す。
 ///
-///   "query a(id: Nope) -> one {}"  → 12 文字目の型名が未知
-///   "query a() -> one { SELECT 1"  → 閉じ括弧が無い（位置は末尾）
-///   "quer a() -> one {}"           → 先頭に query が無い
+///   "query a(id: Nope) -> one {}"          → 12 文字目の型名が未知
+///   "query a(id: Option[Nope]) -> one {}"  → Option の中身が未知（綴りは書いたまま）
+///   "query a() -> one { SELECT 1"          → 閉じ括弧が無い（位置は末尾）
+///   "quer a() -> one {}"                   → 先頭に query が無い
 @Test
 def testSyntaxErrors(): Unit \ Assert =
     let errors = List#{
         "query a(id: Nope) -> one {}",
+        "query a(id: Option[Nope]) -> one {}",
         "query a() -> one { SELECT 1",
         "quer a() -> one {}"
     } |> List.map(source -> QParser.parseFile(source) |> Result.map(List.length));
     Assert.assertEq(expected = List#{
         Err(ParseError.UnknownType(12, "Nope")),
+        Err(ParseError.UnknownType(12, "Option[Nope]")),
         Err(ParseError.Unexpected(27, "'}' closing the query body")),
         Err(ParseError.Unexpected(0, "'query'"))
     }, errors)

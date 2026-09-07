@@ -93,21 +93,24 @@ mod QParser {
                 forM (
                     (name, afterName) <- expectIdent("parameter name", cursorAtToken);
                     afterColon <- expectChar(':', afterName);
-                    (paramType, afterType) <- parseParamType(afterColon);
+                    ((paramType, optional), afterType) <- parseParamType(afterColon);
                     afterSeparator <- skipOptionalChar(',', afterType);
-                    result <- parseParams(afterSeparator, { name = name, paramType = paramType } :: acc)
+                    result <- parseParams(afterSeparator, { name = name, paramType = paramType, optional = optional } :: acc)
                 ) yield result
         }
 
     ///
-    /// `Int64` や `List[Int64]`。綴りを丸ごと取って SqlType.fromFlixName に渡す。
+    /// `Int64` や `List[Int64]`、`Option[Timestamp]`。綴りを丸ごと取り、`Option[..]` なら中身を SqlType.fromFlixName に渡す。
+    /// 中身が知らない綴りなら、書いたとおりの綴り（`Option[Foo]`）で UnknownType。
     ///
-    def parseParamType(cursor: Cursor): Result[ParseError, (SqlType, Cursor)] =
+    def parseParamType(cursor: Cursor): Result[ParseError, ((SqlType, Bool), Cursor)] =
         let cursorAtToken = skipTrivia(cursor);
         let spelling = List.takeWhile(ch -> Char.isLetterOrDigit(ch) or ch == '[' or ch == ']', cursorAtToken#rest) |> charsToString;
         let next = advance(String.length(spelling), cursorAtToken);
-        match SqlType.fromFlixName(spelling) {
-            case Some(paramType) => Ok((paramType, next))
+        let optional = String.startsWith(prefix = "Option[", spelling) and String.endsWith(suffix = "]", spelling);
+        let inner = if (optional) String.slice(start = 7, end = String.length(spelling) - 1, spelling) else spelling;
+        match SqlType.fromFlixName(inner) {
+            case Some(paramType) => Ok(((paramType, optional), next))
             case None => Err(ParseError.UnknownType(cursorAtToken#pos, spelling))
         }
 

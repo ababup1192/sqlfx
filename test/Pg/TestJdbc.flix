@@ -153,6 +153,38 @@ def testPgAllNullRow(): Unit \ {Assert, IO} =
     });
     Assert.assertEq(expected = Ok(Some(List.repeat(10, SqlValue.Null))), result)
 
+/// 型の付いた NULL（NullOf）は全部の型を送れて、列に NULL が入る。
+/// setNull に渡す java.sql.Types が pgjdbc の知らない値なら、ここで例外になる。
+@Test
+def testPgTypedNullsBind(): Unit \ {Assert, IO} =
+    let typedNulls = List#{
+        SqlValue.NullOf(SqlValue.NullType.Bool), SqlValue.NullOf(SqlValue.NullType.Int32), SqlValue.NullOf(SqlValue.NullType.Int64),
+        SqlValue.NullOf(SqlValue.NullType.Float64), SqlValue.NullOf(SqlValue.NullType.Decimal), SqlValue.NullOf(SqlValue.NullType.Str),
+        SqlValue.NullOf(SqlValue.NullType.Bytes), SqlValue.NullOf(SqlValue.NullType.Timestamp), SqlValue.NullOf(SqlValue.NullType.Date),
+        SqlValue.NullOf(SqlValue.NullType.Uuid), SqlValue.NullOf(SqlValue.NullType.Json), SqlValue.NullOf(SqlValue.NullType.Int64Array),
+        SqlValue.NullOf(SqlValue.NullType.StrArray)
+    };
+    let result = withPg(() -> {
+        discard Sql.execute("DROP TABLE IF EXISTS sqlfx_test_typed_nulls", Nil);
+        discard Sql.execute("CREATE TABLE sqlfx_test_typed_nulls (bl BOOLEAN, i4 INTEGER, i8 BIGINT, f8 DOUBLE PRECISION, "
+            + "d NUMERIC, s TEXT, b BYTEA, t TIMESTAMPTZ, dt DATE, u UUID, j JSONB, ia BIGINT[], sa TEXT[])", Nil);
+        discard Sql.execute("INSERT INTO sqlfx_test_typed_nulls VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", typedNulls);
+        Sql.fetchOne("SELECT * FROM sqlfx_test_typed_nulls", Nil) |> Option.map(row -> row#cells |> Vector.toList)
+    });
+    Assert.assertEq(expected = Ok(Some(List.repeat(13, SqlValue.Null))), result)
+
+/// 型の付いた NULL は `col = $1` のように PG が型を決められない位置でも文として通る（引ける行は無い。SQL の `= NULL` の意味）。
+@Test
+def testPgTypedNullInComparison(): Unit \ {Assert, IO} =
+    let result = withPg(() -> {
+        resetUsers();
+        discard Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('a', NULL, now())", Nil);
+        let byEquality = Sql.fetch("SELECT id FROM sqlfx_test_users WHERE email = $1", List#{SqlValue.NullOf(SqlValue.NullType.Str)}) |> List.length;
+        let byIsNotDistinct = Sql.fetch("SELECT id FROM sqlfx_test_users WHERE email IS NOT DISTINCT FROM $1", List#{SqlValue.NullOf(SqlValue.NullType.Str)}) |> List.length;
+        (byEquality, byIsNotDistinct)
+    });
+    Assert.assertEq(expected = Ok((0, 1)), result)
+
 /// 1970 年より前の秒未満付き時刻、bytea、double、integer、bigint[] の往復。
 @Test
 def testPgMoreTypesRoundTrip(): Unit \ {Assert, IO} =

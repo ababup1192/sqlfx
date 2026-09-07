@@ -8,8 +8,14 @@ mod SqlValue {
     /// Java 型との変換は JDBC ハンドラの内側に閉じる。
     ///
     pub enum SqlValue with Eq, Order, ToString {
-        /// SQL の NULL
+        /// SQL の NULL。型が付かない（結果セットのセルは列の型が分かっているので、これで足りる）
         case Null
+        /// 型の付いた SQL の NULL。`Option` の引数の None がこれになる
+        ///
+        /// WhyNot: `Null` を使い回さないのは、プレースホルダに型無しの NULL を渡すと
+        /// `WHERE col = $1` や関数の引数のように PG が文脈から型を決められない位置で
+        /// 「could not determine data type」になるから。
+        case NullOf(NullType)
         case Bool(Bool)
         case Int32(Int32)
         case Int64(Int64)
@@ -33,7 +39,38 @@ mod SqlValue {
         case StrArray(List[String])
     }
 
+    ///
+    /// NULL に付ける型。case 名は SqlValue の値の case と揃えてある（生成器が case 名から綴りを作る）。
+    /// JDBC の `setNull` に渡す `java.sql.Types` への対応は JdbcConvert が持つ。
+    ///
+    pub enum NullType with Eq, Order, ToString {
+        case Bool
+        case Int32
+        case Int64
+        case Float64
+        case Decimal
+        case Str
+        case Bytes
+        case Timestamp
+        case Date
+        case Uuid
+        case Json
+        case Int64Array
+        case StrArray
+    }
+
     // ---- 意味を持つ型からの包み。生成コードと Col が使う ----
+
+    ///
+    /// `Option` の引数を SqlValue に。Some は `wrap` で包み、None は型の付いた NULL。
+    /// 生成コードが `.q` の `Option[T]` の引数に使う。
+    ///
+    pub def ofOption(nullType: NullType, wrap: a -> SqlValue \ ef, value: Option[a]): SqlValue \ ef =
+        match value {
+            case Some(inner) => wrap(inner)
+            case None => SqlValue.NullOf(nullType)
+        }
+
 
     pub def ofTimestamp(t: Timestamp.Timestamp): SqlValue = SqlValue.Timestamp(Timestamp.toEpochMicros(t))
     pub def ofDate(d: Date.Date): SqlValue = SqlValue.Date(Date.toEpochDay(d))
@@ -45,6 +82,7 @@ mod SqlValue {
     ///
     pub def typeName(value: SqlValue): String = match value {
         case SqlValue.Null => "NULL"
+        case SqlValue.NullOf(_) => "NULL"
         case SqlValue.Bool(_) => "Bool"
         case SqlValue.Int32(_) => "Int32"
         case SqlValue.Int64(_) => "Int64"
@@ -65,6 +103,7 @@ mod SqlValue {
     ///
     pub def isNull(value: SqlValue): Bool = match value {
         case SqlValue.Null => true
+        case SqlValue.NullOf(_) => true
         case _ => false
     }
 

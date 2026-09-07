@@ -119,6 +119,7 @@ mod JdbcConvert {
     def bindParam(conn: Connection, statement: PreparedStatement, index: Int32, value: SqlValue): Unit \ IO =
         match value {
             case SqlValue.Null => statement.setNull(index, Types.NULL)
+            case SqlValue.NullOf(nullType) => statement.setNull(index, jdbcType(nullType))
             case SqlValue.Bool(b) => statement.setBoolean(index, b)
             case SqlValue.Int32(i) => statement.setInt(index, i)
             case SqlValue.Int64(i) => statement.setLong(index, i)
@@ -143,6 +144,28 @@ mod JdbcConvert {
                 statement.setArray(index, conn.createArrayOf("text", boxed))
             }
         }
+
+    ///
+    /// 型の付いた NULL を送るときの `java.sql.Types`。pgjdbc がここから oid を決める。
+    ///
+    /// WhyNot: uuid / json / 配列を `Types.OTHER` にするのは、JDBC にその型の定数が無く、
+    /// pgjdbc が OTHER を「型を指定しない NULL」に写すから。列に入れる位置なら PG が列の型で解決する。
+    ///
+    def jdbcType(nullType: SqlValue.NullType): Int32 = match nullType {
+        case SqlValue.NullType.Bool => Types.BOOLEAN
+        case SqlValue.NullType.Int32 => Types.INTEGER
+        case SqlValue.NullType.Int64 => Types.BIGINT
+        case SqlValue.NullType.Float64 => Types.DOUBLE
+        case SqlValue.NullType.Decimal => Types.NUMERIC
+        case SqlValue.NullType.Str => Types.VARCHAR
+        case SqlValue.NullType.Bytes => Types.VARBINARY
+        case SqlValue.NullType.Timestamp => Types.TIMESTAMP_WITH_TIMEZONE
+        case SqlValue.NullType.Date => Types.DATE
+        case SqlValue.NullType.Uuid => Types.OTHER
+        case SqlValue.NullType.Json => Types.OTHER
+        case SqlValue.NullType.Int64Array => Types.ARRAY
+        case SqlValue.NullType.StrArray => Types.ARRAY
+    }
 
     ///
     /// 結果セットを全部読んで Row のリストにする。読み終わったら接続から独立した値になる。
