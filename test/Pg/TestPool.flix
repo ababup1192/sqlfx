@@ -4,7 +4,7 @@ use DbError.DbFailure
 // Pool: HikariCP を包んだ接続プール。実 PG で、使い回し・枯渇時の待ち・閉じた後を確かめる。
 
 def smallPool(borrowTimeoutMs: Int32): Pool.Pool \ IO =
-    Pool.open({ connection = pgConfig(), maxConnections = 1, borrowTimeoutMs = borrowTimeoutMs })
+    Pool.open({ maxConnections = 1, borrowTimeoutMs = borrowTimeoutMs | Pool.defaultConfig(pgConfig()) })
 
 /// 借りて返した接続は次も同じ物が来る（サーバ側の backend pid が一致する）。
 @Test
@@ -44,7 +44,7 @@ def testPoolClosedIsConnectionLost(): Unit \ {Assert, IO} =
 @Test
 def testPoolLazyTxDoesNotBorrowWithoutSql(): Unit \ {Assert, IO} =
     let config = pgConfig();
-    let pool = Pool.open({ connection = { url = config#url, user = config#user, password = "wrong" }, maxConnections = 1, borrowTimeoutMs = 1000 });
+    let pool = Pool.open({ maxConnections = 1, borrowTimeoutMs = 1000 | Pool.defaultConfig({ url = config#url, user = config#user, password = "wrong" }) });
     let pure = DbError.runWithFailure(() -> Pool.withLazyTx(pool, () -> 42));
     let reading = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withLazyTx(pool, () -> Sql.fetch("SELECT 1", Nil) |> List.length)))
         |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(", "${failure}"));
@@ -88,3 +88,22 @@ def testPoolLazyTxAfterBegin(): Unit \ {Assert, IO} =
     let pure = DbError.runWithFailure(() -> Pool.withLazyTxAfterBegin(pool, () -> Ref.put(Ref.get(counter) + 1, counter), () -> 42));
     Pool.close(pool);
     Assert.assertEq(expected = (Ok(Some("7")), Ok(Some("")), Ok(42), 0), (seen, afterwards, pure, Ref.get(counter)))
+
+// ---- stats ----
+
+/// 借りている間は active が 1 で total も 1、返した後は active が 0 で idle に戻る。max は設定値。
+///
+///   open            active 0
+///   withConnection  active 1  total 1
+///   返した後         active 0  idle 1
+@Test
+def testPoolStatsFollowBorrowAndReturn(): Unit \ {Assert, IO} =
+    let pool = smallPool(1000);
+    let inside = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> {
+        discard Sql.fetch("SELECT 1", Nil);
+        let stats = Pool.stats(pool);
+        (stats#active, stats#total, stats#max)
+    })));
+    let after = Pool.stats(pool);
+    Pool.close(pool);
+    Assert.assertEq(expected = (Ok((1, 1, 1)), 0, 1), (inside, after#active, after#idle))

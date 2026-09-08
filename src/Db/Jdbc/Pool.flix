@@ -8,6 +8,7 @@ mod Pool {
     import java.sql.SQLException
     import com.zaxxer.hikari.HikariConfig
     import com.zaxxer.hikari.HikariDataSource
+    import com.zaxxer.hikari.HikariPoolMXBean
     import org.postgresql.ds.PGSimpleDataSource
 
     ///
@@ -23,14 +24,32 @@ mod Pool {
     /// - `connection`: 接続先と認証
     /// - `maxConnections`: 同時に使う接続の上限。超えた分は `borrowTimeoutMs` まで待つ
     /// - `borrowTimeoutMs`: 借りるのを待つ上限。超えたら TransientDbErr.timeout
+    /// - `leakDetectionThresholdMs`: 借りたまま返さない接続を HikariCP が SLF4J の warn に出すまでの ms。0 で無効。
+    ///   HikariCP は 2000 未満を黙って無効にするので、0 でなければ 2000 以上に丸める
     ///
-    pub type alias PoolConfig = { connection = Jdbc.ConnectionConfig, maxConnections = Int32, borrowTimeoutMs = Int32 }
+    pub type alias PoolConfig = { connection = Jdbc.ConnectionConfig, maxConnections = Int32, borrowTimeoutMs = Int32, leakDetectionThresholdMs = Int32 }
 
     ///
-    /// 既定の設定。接続数 10、待ち 5 秒。
+    /// プールの数字。`/health` のような所で枯渇や漏れを見るのに使う。
+    ///
+    /// - `active`: 借りられている接続
+    /// - `idle`: 空いている接続
+    /// - `waiting`: 借りるのを待っているスレッド
+    /// - `total`: 開いている接続（active + idle）
+    /// - `max`: 設定の上限（`maxConnections`）
+    ///
+    pub type alias PoolStats = { active = Int32, idle = Int32, waiting = Int32, total = Int32, max = Int32 }
+
+    ///
+    /// 既定の設定。接続数 10、待ち 5 秒、漏れの検出は無効。
     ///
     pub def defaultConfig(connection: Jdbc.ConnectionConfig): PoolConfig =
-        { connection = connection, maxConnections = 10, borrowTimeoutMs = 5000 }
+        { connection = connection, maxConnections = 10, borrowTimeoutMs = 5000, leakDetectionThresholdMs = 0 }
+
+    ///
+    /// HikariCP が受け付ける最小の漏れ検出のしきい値（ms）。
+    ///
+    def minLeakDetectionThresholdMs(): Int32 = 2000
 
     ///
     /// プールを開く。この時点では接続しない（最初の borrow で開く）。
@@ -51,7 +70,37 @@ mod Pool {
         hikari.setMaximumPoolSize(config#maxConnections);
         hikari.setConnectionTimeout(Int32.toInt64(config#borrowTimeoutMs));
         hikari.setInitializationFailTimeout(-1i64);
+        hikari.setLeakDetectionThreshold(Int32.toInt64(roundLeakDetectionThreshold(config#leakDetectionThresholdMs)));
         Pool.Pool(new HikariDataSource(hikari))
+
+    ///
+    /// 0 以下は 0（無効）、それ以外は 2000 以上に丸める。
+    ///
+    def roundLeakDetectionThreshold(ms: Int32): Int32 =
+        if (ms <= 0) 0 else Int32.max(minLeakDetectionThresholdMs(), ms)
+
+    ///
+    /// HikariCP に渡っている漏れ検出のしきい値（ms）。0 なら無効。
+    ///
+    pub def leakDetectionThresholdMs(pool: Pool): Int32 \ IO =
+        let Pool.Pool(source) = pool;
+        let threshold: Int64 = source.getLeakDetectionThreshold();
+        Int64.clampToInt32(min = 0, max = Int32.maxValue(), threshold)
+
+    ///
+    /// 今の数字。
+    ///
+    /// WhyNot: MXBean が null の時に例外にしないのは、プールがまだ 1 本も開いていない（`initializationFailTimeout` -1 で
+    /// 遅延している）時や閉じた後にも `/health` は読みに来るので、その時は「0 本」と答える方が扱いやすいため。
+    ///
+    pub def stats(pool: Pool): PoolStats \ IO =
+        let Pool.Pool(source) = pool;
+        let max: Int32 = source.getMaximumPoolSize();
+        let bean: HikariPoolMXBean = source.getHikariPoolMXBean();
+        if (Object.isNull(bean))
+            { active = 0, idle = 0, waiting = 0, total = 0, max = max }
+        else
+            { active = bean.getActiveConnections(), idle = bean.getIdleConnections(), waiting = bean.getThreadsAwaitingConnection(), total = bean.getTotalConnections(), max = max }
 
     ///
     /// 全接続を閉じる。終了時に 1 回。
