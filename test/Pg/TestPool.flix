@@ -1,7 +1,9 @@
 import java.lang.RuntimeException
 
 use SqlValue.SqlValue
-use DbError.DbFailure
+use DbError.DbErrorKind
+use DbError.Failure
+use DbError.TransientKind
 
 // Pool: HikariCP を包んだ接続プール。実 PG で、使い回し・枯渇時の待ち・閉じた後を確かめる。
 
@@ -29,7 +31,7 @@ def testPoolBorrowTimesOutWhenExhausted(): Unit \ {Assert, IO} =
             DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))));
     let afterwards = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)));
     Pool.close(pool);
-    Assert.assertEq(expected = (Ok(Err(DbFailure.Transient("timeout 0"))), Ok(1)), (inner, afterwards))
+    Assert.assertEq(expected = (Ok(Err(Failure.Transient(TransientKind.Timeout(0)))), Ok(1)), (inner, afterwards))
 
 /// 閉じたプールから借りると TransientDbErr.connectionLost。
 @Test
@@ -37,7 +39,7 @@ def testPoolClosedIsConnectionLost(): Unit \ {Assert, IO} =
     let pool = smallPool(1000);
     Pool.close(pool);
     let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))
-        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(connectionLost", "${failure}"));
+        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(ConnectionLost", "${failure}"));
     Assert.assertEq(expected = Err(true), result)
 
 // ---- withLazyTx ----
@@ -72,7 +74,7 @@ def testPoolLazyTxRollsBackAndCommits(): Unit \ {Assert, IO} =
         (failed, afterFailure, afterCommit)
     }));
     Pool.close(pool);
-    Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_email_key")), 0, 1)), result)
+    Assert.assertEq(expected = Ok((Err(Failure.Permanent(DbErrorKind.UniqueViolation("sqlfx_test_users_email_key"))), 0, 1)), result)
 
 /// thunk が JVM の例外を投げても、Tx は ROLLBACK され接続はプールに返る。
 ///
@@ -82,15 +84,15 @@ def testPoolLazyTxRollsBackOnException(): Unit \ {Assert, IO} =
     let pool = smallPool(1000);
     let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> {
         Pool.withConnection(pool, _ -> resetUsers());
-        let failed: Result[DbFailure, Unit] = DbError.runWithFailure(() -> Pool.withLazyTx(pool, () -> {
+        let failed: Result[Failure, Unit] = DbError.runWithFailure(() -> Pool.withLazyTx(pool, () -> {
             discard Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('a', 'x@example.com', now())", Nil);
             throw new RuntimeException("boom")
         }));
         let rows = Pool.withConnection(pool, _ -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
-        (failed |> Result.mapErr(failure -> "${failure}"), rows, Pool.stats(pool)#active)
+        (failed, rows, Pool.stats(pool)#active)
     }));
     Pool.close(pool);
-    Assert.assertEq(expected = Ok((Err("Permanent(other boom)"), 0, 0)), result)
+    Assert.assertEq(expected = Ok((Err(Failure.Permanent(DbErrorKind.Other("boom"))), 0, 0)), result)
 
 /// withLazyTxResult は thunk の Err で ROLLBACK して Err をそのまま返し、Ok なら COMMIT する。
 ///
@@ -157,6 +159,6 @@ def testPoolStatsFollowBorrowAndReturn(): Unit \ {Assert, IO} =
 def testPoolUnreachableIsConnectionLost(): Unit \ {Assert, IO} =
     let pool = Pool.open({ maxConnections = 2, borrowTimeoutMs = 250 | Pool.defaultConfig({ url = "jdbc:postgresql://127.0.0.1:1/none", user = "none", password = "none" }) });
     let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))
-        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(connectionLost", "${failure}"));
+        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(ConnectionLost", "${failure}"));
     Pool.close(pool);
     Assert.assertEq(expected = Err(true), result)

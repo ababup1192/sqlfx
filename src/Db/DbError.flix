@@ -132,19 +132,24 @@ mod DbError {
 
     ///
     /// 2 分類を 1 層の Result に落とした失敗。境界（main / HTTP ハンドラ / テスト）で使う。
-    /// 業務コードはこれを返さず、エフェクトのまま上へ流す。
+    /// 業務コードはこれを返さず、エフェクトのまま上へ流す。人が読む 1 行は `describeFailure`。
     ///
-    pub enum DbFailure with Eq, Order, ToString {
-        /// TransientDbErr の説明
-        case Transient(String)
-        /// DbErr の説明
-        case Permanent(String)
+    pub enum Failure with Eq, Order, ToString {
+        /// 再実行で直りうる失敗
+        case Transient(TransientKind)
+        /// 再実行しても直らない失敗
+        case Permanent(DbErrorKind)
     }
+
+    ///
+    /// 旧名（0.3.x）。型の位置でだけ使える（`DbFailure.Permanent(...)` とは書けない）。
+    ///
+    pub type alias DbFailure = Failure
 
     ///
     /// 2 分類をまとめて 1 層の Result に落とす。Ok なら失敗無し。
     ///
-    pub def runWithFailure(thunk: Unit -> a \ ef): Result[DbFailure, a] \ ef - {TransientDbErr, DbErr} =
+    pub def runWithFailure(thunk: Unit -> a \ ef): Result[Failure, a] \ ef - {TransientDbErr, DbErr} =
         runWithKind(thunk) |> Result.mapErr(toFailure)
 
     ///
@@ -172,8 +177,18 @@ mod DbError {
         case TransientKind.ConnectionLost(msg) => "connectionLost ${msg}"
     }
 
-    def toFailure(kind: DbErrorKind): DbFailure =
-        if (isTransient(kind)) DbFailure.Transient(describe(kind)) else DbFailure.Permanent(describe(kind))
+    ///
+    /// 失敗を人が読む 1 行にする。
+    ///
+    pub def describeFailure(failure: Failure): String = match failure {
+        case Failure.Transient(transient) => describeTransient(transient)
+        case Failure.Permanent(kind)      => describe(kind)
+    }
+
+    def toFailure(kind: DbErrorKind): Failure = match transientOf(kind) {
+        case Some(transient) => Failure.Transient(transient)
+        case None            => Failure.Permanent(kind)
+    }
 
 }
 

@@ -1,5 +1,5 @@
 use SqlValue.SqlValue
-use DbError.DbFailure
+use DbError.Failure
 use Migrate.Status
 
 // Migrate: 実 PG で apply / status / check。fixtures は test/fixtures/migrations（3 ファイル。003 は no-transaction）。

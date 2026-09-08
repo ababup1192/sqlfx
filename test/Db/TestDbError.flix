@@ -83,3 +83,24 @@ def testKindConstraintName(): Unit \ Assert =
             None, None, None, None, None, None
         },
         allKinds() |> List.map(DbError.constraintName))
+
+/// 失敗は 2 分類の enum。一時障害は Transient、それ以外は Permanent に kind をそのまま持つ。
+@Test
+def testRunWithFailureSplitsInTwo(): Unit \ Assert =
+    let toFailure = kind -> DbError.runWithFailure(() -> DbError.raise(kind)) |> Result.map(_ -> ());
+    Assert.assertEq(
+        expected = allKinds() |> List.map(kind -> match DbError.transientOf(kind) {
+            case Some(transient) => Err(DbError.Failure.Transient(transient))
+            case None            => Err(DbError.Failure.Permanent(kind))
+        }),
+        allKinds() |> List.map(toFailure))
+
+/// 人が読む 1 行は describeFailure（describe と同じ文言）。
+@Test
+def testDescribeFailure(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{"deadlock", "uniqueViolation users_email_key"},
+        List#{
+            DbError.describeFailure(DbError.Failure.Transient(TransientKind.Deadlock)),
+            DbError.describeFailure(DbError.Failure.Permanent(DbErrorKind.UniqueViolation("users_email_key")))
+        })

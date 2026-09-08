@@ -7,7 +7,7 @@
 ///   attempt 3: Ok
 @Test
 def testRetrySucceedsWithinAttempts(): Unit \ Assert =
-    let (result, calls): (Result[DbError.DbFailure, String], Int32) = region rc {
+    let (result, calls): (Result[DbError.Failure, String], Int32) = region rc {
         let counter = Ref.fresh(rc, 0);
         let thunk = () -> {
             Ref.put(Ref.get(counter) + 1, counter);
@@ -21,12 +21,12 @@ def testRetrySucceedsWithinAttempts(): Unit \ Assert =
 @Test
 def testRetryExhaustedBecomesDbErr(): Unit \ Assert =
     let result = DbError.runWithFailure(() -> Retry.withRetry(2, () -> TransientDbErr.timeout(500)));
-    Assert.assertEq(expected = Err(DbError.DbFailure.Permanent("retryExhausted timeout 500 after 2 attempts")), result |> Result.map(_ -> ()))
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbError.DbErrorKind.RetryExhausted(DbError.TransientKind.Timeout(500), 2))), result |> Result.map(_ -> ()))
 
 /// DbErr は再試行しない（1 回で外へ出る）。
 @Test
 def testRetryDoesNotRetryDbErr(): Unit \ Assert =
-    let (result, calls): (Result[DbError.DbFailure, Unit], Int32) = region rc {
+    let (result, calls): (Result[DbError.Failure, Unit], Int32) = region rc {
         let counter = Ref.fresh(rc, 0);
         let thunk = () -> {
             Ref.put(Ref.get(counter) + 1, counter);
@@ -34,13 +34,13 @@ def testRetryDoesNotRetryDbErr(): Unit \ Assert =
         };
         (DbError.runWithFailure(() -> Retry.withRetry(3, thunk)), Ref.get(counter))
     };
-    Assert.assertEq(expected = (Err(DbError.DbFailure.Permanent("uniqueViolation users_email_key")), 1), (result |> Result.map(_ -> ()), calls))
+    Assert.assertEq(expected = (Err(DbError.Failure.Permanent(DbError.DbErrorKind.UniqueViolation("users_email_key"))), 1), (result |> Result.map(_ -> ()), calls))
 
 /// attempts が 1 未満でも 1 回は走り、枯渇のメッセージも 1 回と言う。
 @Test
 def testRetryAttemptsBelowOneRunsOnce(): Unit \ Assert =
-    let result: Result[DbError.DbFailure, Unit] = DbError.runWithFailure(() -> Retry.withRetry(0, () -> TransientDbErr.deadlock()));
-    Assert.assertEq(expected = Err(DbError.DbFailure.Permanent("retryExhausted deadlock after 1 attempts")), result)
+    let result: Result[DbError.Failure, Unit] = DbError.runWithFailure(() -> Retry.withRetry(0, () -> TransientDbErr.deadlock()));
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbError.DbErrorKind.RetryExhausted(DbError.TransientKind.Deadlock, 1))), result)
 
 // ---- backoff と jitter（DB 無し・純粋） ----
 
@@ -94,7 +94,7 @@ def testBackoffMsBoundaries(): Unit \ Assert =
 ///   attempt 3: Ok       → 待たない
 @Test
 def testRetryWithWaitsBetweenAttempts(): Unit \ Assert =
-    let (result, waits): (Result[DbError.DbFailure, String], List[Int32]) = region rc {
+    let (result, waits): (Result[DbError.Failure, String], List[Int32]) = region rc {
         let counter = Ref.fresh(rc, 0);
         let log = Ref.fresh(rc, Nil);
         let thunk = () -> {
@@ -113,12 +113,12 @@ def testRetryWithWaitsBetweenAttempts(): Unit \ Assert =
 ///   attempt 3: timeout → retryExhausted（待たない）
 @Test
 def testRetryWithExhaustedDoesNotWaitAfterLast(): Unit \ Assert =
-    let (result, waits): (Result[DbError.DbFailure, Unit], List[Int32]) = region rc {
+    let (result, waits): (Result[DbError.Failure, Unit], List[Int32]) = region rc {
         let log = Ref.fresh(rc, Nil);
         let outcome = DbError.runWithFailure(() -> Retry.withRetryWith(Retry.defaultPolicy(), recordWait(log), () -> 1.0, () -> TransientDbErr.timeout(500)));
         (outcome, Ref.get(log) |> List.reverse)
     };
-    Assert.assertEq(expected = (Err(DbError.DbFailure.Permanent("retryExhausted timeout 500 after 3 attempts")), List#{100, 200}), (result, waits))
+    Assert.assertEq(expected = (Err(DbError.Failure.Permanent(DbError.DbErrorKind.RetryExhausted(DbError.TransientKind.Timeout(500), 3))), List#{100, 200}), (result, waits))
 
 /// jitter は失敗のたびに呼ばれ、その回の待ちに掛かる（0.5 なら上限の半分）。
 @Test

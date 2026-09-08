@@ -1,6 +1,6 @@
 use SqlValue.SqlValue
 use Row.Row
-use DbError.DbFailure
+use DbError.Failure
 use DbError.DbErrorKind
 
 // DbTest: テストハンドラと、Sql / DbError の使い心地。失敗は DbError.runWithFailure で 1 層の Result にして比べる。
@@ -49,7 +49,7 @@ def testFetchOne(): Unit \ Assert =
 @Test
 def testFetchAsRaisesDbErrOnDecodeError(): Unit \ Assert =
     Assert.assertEq(
-        expected = Err(DbFailure.Permanent("email: column 'email' is missing")),
+        expected = Err(Failure.Permanent(DbErrorKind.DecodeError("email", "column 'email' is missing"))),
         RawSql.runWithAllow(() -> DbError.runWithFailure(() -> DbTest.runWithRows(dbTestUserRows(), () -> Sql.fetchAs(Decoder.str("email"), "SELECT id, name FROM users", Nil)))))
 
 /// runWithTable は SQL ごとに返す行を変えられる。知らない SQL は空。

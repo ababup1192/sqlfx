@@ -1,5 +1,6 @@
 use SqlValue.SqlValue
-use DbError.DbFailure
+use DbError.DbErrorKind
+use DbError.Failure
 
 // Jdbc: 実 PostgreSQL に当たる層 5 のテスト。test/ の外に置き、make test-pg がコンテナを立てて test/Pg/ へ写して回す。
 
@@ -16,8 +17,8 @@ def pgConfig(): Jdbc.ConnectionConfig \ IO =
         }
     } with Sys.Env.runWithIO
 
-/// 接続を開いて body を走らせ、必ず閉じる。失敗は DbFailure に落とす。
-def withPg(body: Unit -> a \ Db + IO + RawSql): Result[DbFailure, a] \ IO =
+/// 接続を開いて body を走らせ、必ず閉じる。失敗は Failure に落とす。
+def withPg(body: Unit -> a \ Db + IO + RawSql): Result[Failure, a] \ IO =
     DbError.runWithFailure(() -> RawSql.runWithAllow(() -> Jdbc.withConnection(pgConfig(), _ -> body())))
 
 /// テーブルを作り直す。
@@ -77,7 +78,7 @@ def testPgUniqueViolation(): Unit \ {Assert, IO} =
         let _ = Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('b', 'x@example.com', now())", Nil);
         ()
     });
-    Assert.assertEq(expected = Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_email_key")), result)
+    Assert.assertEq(expected = Err(Failure.Permanent(DbErrorKind.UniqueViolation("sqlfx_test_users_email_key"))), result)
 
 /// 無いテーブルは DbErr.schemaMismatch。PG のメッセージ本文はロケール依存なので、種別の接頭辞だけ見る。
 @Test
@@ -119,7 +120,7 @@ def testPgTxRollsBackOnDbErr(): Unit \ {Assert, IO} =
         Jdbc.close(conn);
         (failed, remaining)
     }));
-    Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_email_key")), 0)), result)
+    Assert.assertEq(expected = Ok((Err(Failure.Permanent(DbErrorKind.UniqueViolation("sqlfx_test_users_email_key"))), 0)), result)
 
 /// withTx は正常なら COMMIT する: 別接続から行が見える。
 @Test
@@ -228,7 +229,7 @@ def testPgDecodeErrorIsDbErr(): Unit \ {Assert, IO} =
         discard Sql.execute("INSERT INTO sqlfx_test_users (name, created_at) VALUES ('a', now())", Nil);
         Sql.fetchAs(Decoder.int32("id"), "SELECT id FROM sqlfx_test_users", Nil)
     });
-    Assert.assertEq(expected = Err(DbFailure.Permanent("id: column 'id' is Int64, expected Int32")), result)
+    Assert.assertEq(expected = Err(Failure.Permanent(DbErrorKind.DecodeError("id", "column 'id' is Int64, expected Int32"))), result)
 
 // ---- withConnection / COMMIT の失敗 ----
 
@@ -257,4 +258,4 @@ def testPgCommitFailureIsTranslated(): Unit \ {Assert, IO} =
         let seen = Jdbc.withConnection(pgConfig(), _ -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
         (failed, seen)
     })));
-    Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_name_deferred")), 1)), result)
+    Assert.assertEq(expected = Ok((Err(Failure.Permanent(DbErrorKind.UniqueViolation("sqlfx_test_users_name_deferred"))), 1)), result)
