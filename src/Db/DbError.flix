@@ -31,17 +31,34 @@ mod DbError {
     /// JDBC ハンドラは SQLException をまずこれに落とし（翻訳表は DB 無しでテストする）、
     /// Tx や接続の後始末はこれを受け取ってから op に戻す。
     ///
-    pub enum DbErrorKind with Eq, Order, ToString {
+    pub enum TransientKind with Eq, Order, ToString {
+        /// デッドロック（PG は 40001 / 40P01）
         case Deadlock
+        /// statement_timeout 等。ms は分かるときだけ、分からなければ 0
         case Timeout(Int32)
+        /// 接続が切れた・届かない
         case ConnectionLost(String)
+    }
+
+    ///
+    /// 2 つのエフェクトの op を値にした形。`raise` で op に戻せる。
+    /// JDBC ハンドラは SQLException をまずこれに落とし（翻訳表は DB 無しでテストする）、
+    /// Tx や接続の後始末はこれを受け取ってから op に戻す。
+    ///
+    /// WhyNot: 一時障害を別の enum に割らないのは、`SqlRead` / `SqlWrite` の op が返す `Result[DbErrorKind, _]` と
+    /// `DbTest.runFailingWrite` の署名が 1 つの型を前提にしているため。`Transient` の case で内側に持つ。
+    ///
+    pub enum DbErrorKind with Eq, Order, ToString {
+        /// 再実行で直りうる失敗
+        case Transient(TransientKind)
         case UniqueViolation(String)
         case ForeignKeyViolation(String)
         case CheckViolation(String)
         case NotNullViolation(String)
         case SchemaMismatch(String)
         case DecodeError(String, String)
-        case RetryExhausted(String)
+        /// withRetry が枯渇した。最後の失敗と、呼んだ回数
+        case RetryExhausted(TransientKind, Int32)
         /// 業務の都合で Tx を巻き戻したい。値で受けたいなら `Pool.withLazyTxResult`
         case Rollback
         case Other(String)
@@ -51,10 +68,16 @@ mod DbError {
     /// 再実行で直りうる物か。
     ///
     pub def isTransient(kind: DbErrorKind): Bool = match kind {
-        case DbErrorKind.Deadlock => true
-        case DbErrorKind.Timeout(_) => true
-        case DbErrorKind.ConnectionLost(_) => true
+        case DbErrorKind.Transient(_) => true
         case _ => false
+    }
+
+    ///
+    /// 一時障害なら中身の `TransientKind`。
+    ///
+    pub def transientOf(kind: DbErrorKind): Option[TransientKind] = match kind {
+        case DbErrorKind.Transient(transient) => Some(transient)
+        case _ => None
     }
 
     ///
@@ -83,12 +106,10 @@ mod DbError {
         case DbErrorKind.ForeignKeyViolation(constraint) => Some(constraint)
         case DbErrorKind.CheckViolation(constraint) => Some(constraint)
         case DbErrorKind.NotNullViolation(_) => None
-        case DbErrorKind.Deadlock => None
-        case DbErrorKind.Timeout(_) => None
-        case DbErrorKind.ConnectionLost(_) => None
         case DbErrorKind.SchemaMismatch(_) => None
         case DbErrorKind.DecodeError(_, _) => None
-        case DbErrorKind.RetryExhausted(_) => None
+        case DbErrorKind.Transient(_) => None
+        case DbErrorKind.RetryExhausted(_, _) => None
         case DbErrorKind.Rollback => None
         case DbErrorKind.Other(_) => None
     }
@@ -130,18 +151,25 @@ mod DbError {
     /// 人が読む 1 行にする。
     ///
     pub def describe(kind: DbErrorKind): String = match kind {
-        case DbErrorKind.Deadlock => "deadlock"
-        case DbErrorKind.Timeout(ms) => "timeout ${ms}"
-        case DbErrorKind.ConnectionLost(msg) => "connectionLost ${msg}"
+        case DbErrorKind.Transient(transient) => describeTransient(transient)
         case DbErrorKind.UniqueViolation(constraint) => "uniqueViolation ${constraint}"
         case DbErrorKind.ForeignKeyViolation(constraint) => "foreignKeyViolation ${constraint}"
         case DbErrorKind.CheckViolation(constraint) => "checkViolation ${constraint}"
         case DbErrorKind.NotNullViolation(column) => "notNullViolation ${column}"
         case DbErrorKind.SchemaMismatch(detail) => "schemaMismatch ${detail}"
         case DbErrorKind.DecodeError(column, detail) => "${column}: ${detail}"
-        case DbErrorKind.RetryExhausted(last) => "retryExhausted ${last}"
+        case DbErrorKind.RetryExhausted(last, attempts) => "retryExhausted ${describeTransient(last)} after ${attempts} attempts"
         case DbErrorKind.Rollback => "rollback"
         case DbErrorKind.Other(detail) => "other ${detail}"
+    }
+
+    ///
+    /// 一時障害を人が読む 1 行にする。
+    ///
+    pub def describeTransient(transient: TransientKind): String = match transient {
+        case TransientKind.Deadlock => "deadlock"
+        case TransientKind.Timeout(ms) => "timeout ${ms}"
+        case TransientKind.ConnectionLost(msg) => "connectionLost ${msg}"
     }
 
     def toFailure(kind: DbErrorKind): DbFailure =
@@ -156,27 +184,44 @@ mod TransientDbErr {
     ///
     /// デッドロック（PG は 40001 / 40P01）。
     ///
-    pub def deadlock(): a \ TransientDbErr = TransientDbErr.raise(DbErrorKind.Deadlock)
+    pub def deadlock(): a \ TransientDbErr = raiseTransient(DbError.TransientKind.Deadlock)
 
     ///
     /// statement_timeout 等。ms は分かるときだけ、分からなければ 0。
     ///
-    pub def timeout(ms: Int32): a \ TransientDbErr = TransientDbErr.raise(DbErrorKind.Timeout(ms))
+    pub def timeout(ms: Int32): a \ TransientDbErr = raiseTransient(DbError.TransientKind.Timeout(ms))
 
     ///
     /// 接続が切れた・届かない。
     ///
-    pub def connectionLost(msg: String): a \ TransientDbErr = TransientDbErr.raise(DbErrorKind.ConnectionLost(msg))
+    pub def connectionLost(msg: String): a \ TransientDbErr = raiseTransient(DbError.TransientKind.ConnectionLost(msg))
+
+    ///
+    /// 一時障害の種類をそのまま投げる。
+    ///
+    pub def raiseTransient(transient: DbError.TransientKind): a \ TransientDbErr =
+        TransientDbErr.raise(DbErrorKind.Transient(transient))
 
     ///
     /// TransientDbErr だけを Result に落とす。DbErr は上へ流したまま。withRetry が使う。
     ///
-    pub def runWithResult(thunk: Unit -> a \ ef): Result[String, a] \ ef - TransientDbErr =
+    pub def runWithResult(thunk: Unit -> a \ ef): Result[DbError.TransientKind, a] \ ef - TransientDbErr =
         run {
             Ok(thunk())
         } with handler TransientDbErr {
-            def raise(kind, _resume) = Err(DbError.describe(kind))
+            def raise(kind, _resume) = Err(asTransient(kind))
         }
+
+    ///
+    /// TransientDbErr が運んできた kind の中身。
+    ///
+    /// WhyNot: 約束に反する kind（Transient でない物）を bug! で落とさないのは、ライブラリの使い方の間違いで
+    /// 本番を止めない方が良く、describe を持った ConnectionLost として扱えば情報も落ちないため。
+    ///
+    def asTransient(kind: DbErrorKind): DbError.TransientKind = match DbError.transientOf(kind) {
+        case Some(transient) => transient
+        case None            => DbError.TransientKind.ConnectionLost(DbError.describe(kind))
+    }
 
 }
 
@@ -215,9 +260,10 @@ mod DbErr {
     pub def decodeError(column: String, detail: String): a \ DbErr = DbErr.raise(DbErrorKind.DecodeError(column, detail))
 
     ///
-    /// withRetry が枯渇した。last は最後の失敗の説明。
+    /// withRetry が枯渇した。last は最後の失敗、attempts は呼んだ回数。
     ///
-    pub def retryExhausted(last: String): a \ DbErr = DbErr.raise(DbErrorKind.RetryExhausted(last))
+    pub def retryExhausted(last: DbError.TransientKind, attempts: Int32): a \ DbErr =
+        DbErr.raise(DbErrorKind.RetryExhausted(last, attempts))
 
     ///
     /// 業務の都合で Tx を巻き戻したい。DB の失敗ではない。値で受けたいなら `Pool.withLazyTxResult`。

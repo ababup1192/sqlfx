@@ -1,20 +1,21 @@
 use DbError.DbErrorKind
+use DbError.TransientKind
 
 // DbError: 2 つのエフェクトの op は 1 本（raise）で、種類は DbErrorKind の値。
 // 値 → op → 値の往復と、1 腕だけの手書きハンドラを確かめる。
 
 /// 全ての kind。case を足したらここにも足す（往復とハンドラのテストが自動で広がる）。
 def allKinds(): List[DbErrorKind] = List#{
-    DbErrorKind.Deadlock,
-    DbErrorKind.Timeout(500),
-    DbErrorKind.ConnectionLost("terminating connection"),
+    DbErrorKind.Transient(TransientKind.Deadlock),
+    DbErrorKind.Transient(TransientKind.Timeout(500)),
+    DbErrorKind.Transient(TransientKind.ConnectionLost("terminating connection")),
     DbErrorKind.UniqueViolation("users_email_key"),
     DbErrorKind.ForeignKeyViolation("posts_user_id_fkey"),
     DbErrorKind.CheckViolation("users_name_length"),
     DbErrorKind.NotNullViolation("email"),
     DbErrorKind.SchemaMismatch("relation \"userz\" does not exist"),
     DbErrorKind.DecodeError("id", "column 'id' is Int64, expected Int32"),
-    DbErrorKind.RetryExhausted("timeout 500 after 3 attempts"),
+    DbErrorKind.RetryExhausted(TransientKind.Timeout(500), 3),
     DbErrorKind.Rollback,
     DbErrorKind.Other("XX000: internal error")
 }

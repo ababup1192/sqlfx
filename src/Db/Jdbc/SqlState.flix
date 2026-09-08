@@ -1,6 +1,7 @@
 mod SqlState {
 
     use DbError.DbErrorKind
+    use DbError.TransientKind
 
     ///
     /// PostgreSQL の sqlstate とメッセージを、どの op に翻訳するかの enum に落とす。純粋なので DB 無しでテストする。
@@ -30,11 +31,11 @@ mod SqlState {
         else if (sqlState == "23502")
             DbErrorKind.NotNullViolation(Option.getWithDefault(columnName(message), error#column))
         else if (sqlState == "40001" or sqlState == "40P01")
-            DbErrorKind.Deadlock
+            DbErrorKind.Transient(TransientKind.Deadlock)
         else if (sqlState == "57014")
-            DbErrorKind.Timeout(0)
+            DbErrorKind.Transient(TransientKind.Timeout(0))
         else if (String.startsWith(prefix = "08", sqlState))
-            DbErrorKind.ConnectionLost(message)
+            DbErrorKind.Transient(TransientKind.ConnectionLost(message))
         else if (sqlState == "42P01" or sqlState == "42703" or sqlState == "42883" or sqlState == "42804")
             DbErrorKind.SchemaMismatch(message)
         else

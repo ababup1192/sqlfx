@@ -48,7 +48,7 @@ mod Retry {
             case Ok(value) => value
             case Err(last) =>
                 if (attempt >= attempts)
-                    DbErr.retryExhausted("${last} after ${attempts} attempts")
+                    DbErr.retryExhausted(last, attempts)
                 else {
                     wait(backoffMs(policy, attempt, jitter()));
                     retryLoop(policy, attempts, attempt + 1, wait, jitter, thunk)

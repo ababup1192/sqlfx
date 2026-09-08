@@ -1,4 +1,5 @@
 use DbError.DbErrorKind
+use DbError.TransientKind
 
 // SqlState: sqlstate → DbErrorKind の翻訳表。
 
@@ -16,7 +17,7 @@ def testClassifyDomain(): Unit \ Assert =
 @Test
 def testClassifyTransient(): Unit \ Assert =
     Assert.assertEq(
-        expected = (DbErrorKind.Deadlock, DbErrorKind.Deadlock, DbErrorKind.Timeout(0), DbErrorKind.ConnectionLost("terminating connection")),
+        expected = (DbErrorKind.Transient(TransientKind.Deadlock), DbErrorKind.Transient(TransientKind.Deadlock), DbErrorKind.Transient(TransientKind.Timeout(0)), DbErrorKind.Transient(TransientKind.ConnectionLost("terminating connection"))),
         (
             SqlState.classify({ sqlState = "40P01", message = "deadlock detected" }),
             SqlState.classify({ sqlState = "40001", message = "could not serialize access" }),

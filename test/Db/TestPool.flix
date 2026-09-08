@@ -27,7 +27,7 @@ def testPoolDefaultConfigHasNoLeakDetection(): Unit \ Assert =
     Assert.assertEq(expected = 0, config#leakDetectionThresholdMs)
 
 /// borrow が失敗した時の分類の入力。message / cause の class 名 / SQLState / その時の stats。
-def borrowCase(causes: List[String], sqlState: Option[String], active: Int32, max: Int32): DbError.DbErrorKind =
+def borrowCase(causes: List[String], sqlState: Option[String], active: Int32, max: Int32): DbError.TransientKind =
     Pool.borrowFailureKind("Connection is not available, request timed out after 300ms.", causes, sqlState, { active = active, idle = 0, waiting = 0, total = active, max = max })
 
 /// borrow の失敗は stats と cause で分ける。
@@ -42,7 +42,7 @@ def borrowCase(causes: List[String], sqlState: Option[String], active: Int32, ma
 ///   max 0（プールが開いていない）                    → connectionLost
 @Test
 def testPoolBorrowFailureKind(): Unit \ Assert =
-    let lost = DbError.DbErrorKind.ConnectionLost("Connection is not available, request timed out after 300ms.");
+    let lost = DbError.TransientKind.ConnectionLost("Connection is not available, request timed out after 300ms.");
     let cases = List#{
         borrowCase(Nil, None, 3, 3),
         borrowCase(Nil, None, 1, 3),
@@ -54,13 +54,13 @@ def testPoolBorrowFailureKind(): Unit \ Assert =
         borrowCase(Nil, None, 0, 0)
     };
     Assert.assertEq(expected = List#{
-        DbError.DbErrorKind.Timeout(0),
+        DbError.TransientKind.Timeout(0),
         lost,
         lost,
         lost,
         lost,
-        DbError.DbErrorKind.Timeout(0),
-        DbError.DbErrorKind.Timeout(0),
+        DbError.TransientKind.Timeout(0),
+        DbError.TransientKind.Timeout(0),
         lost
     }, cases)
 

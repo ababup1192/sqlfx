@@ -128,11 +128,7 @@ mod Pool {
                 let msg: String = e.getMessage();
                 let text = if (Object.isNull(msg)) "" else msg;
                 let causes = causeClassNames(unchecked_cast(e as Throwable), maxCauseDepth());
-                match borrowFailureKind(text, causes, sqlStateOf(e), stats(pool)) {
-                    case DbError.DbErrorKind.Timeout(ms)     => TransientDbErr.timeout(ms)
-                    case DbError.DbErrorKind.ConnectionLost(m) => TransientDbErr.connectionLost(m)
-                    case kind                                => TransientDbErr.connectionLost("${kind}")
-                }
+                TransientDbErr.raiseTransient(borrowFailureKind(text, causes, sqlStateOf(e), stats(pool)))
         }
 
     ///
@@ -142,13 +138,13 @@ mod Pool {
     /// - そうでなく pool が満杯（`active >= max`）なら timeout（借り待ちの上限）
     /// - それ以外は、pool は空いているのに接続が作れなかったので connectionLost
     ///
-    pub def borrowFailureKind(message: String, causes: List[String], sqlState: Option[String], poolStats: PoolStats): DbError.DbErrorKind =
+    pub def borrowFailureKind(message: String, causes: List[String], sqlState: Option[String], poolStats: PoolStats): DbError.TransientKind =
         if (isConnectionFailure(causes, sqlState))
-            DbError.DbErrorKind.ConnectionLost(message)
+            DbError.TransientKind.ConnectionLost(message)
         else if (poolStats#max > 0 and poolStats#active >= poolStats#max)
-            DbError.DbErrorKind.Timeout(0)
+            DbError.TransientKind.Timeout(0)
         else
-            DbError.DbErrorKind.ConnectionLost(message)
+            DbError.TransientKind.ConnectionLost(message)
 
     ///
     /// cause の連鎖が「DB に届かなかった」事を示すか。
