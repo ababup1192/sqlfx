@@ -292,12 +292,13 @@ mod DbErr {
 
     ///
     /// DbErr だけを Result に落とす。Transient は上へ流したまま、DbErr だけ値にしたいときに使う。
+    /// 人が読む 1 行は `DbError.describe(kind)`。
     ///
-    pub def runWithResult(thunk: Unit -> a \ ef): Result[String, a] \ ef - DbErr =
+    pub def runWithResult(thunk: Unit -> a \ ef): Result[DbErrorKind, a] \ ef - DbErr =
         run {
             Ok(thunk())
         } with handler DbErr {
-            def raise(kind, _resume) = Err(DbError.describe(kind))
+            def raise(kind, _resume) = Err(kind)
         }
 
 }

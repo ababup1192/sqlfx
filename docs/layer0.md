@@ -191,10 +191,10 @@ op を足すときに触るのは eff・`DbErrorKind`・`raise`・`runWithKind`�
 業務コードは Result を返さず、エフェクトのまま上へ流す。境界で値にしたいときは 2 つの落とし方がある:
 
 - `DbError.runWithFailure(thunk): Result[DbFailure, a] \ ef - {TransientDbErr, DbErr}`
-  2 分類をまとめて **1 層** の Result にする。`DbFailure` は `Transient(String)` / `Permanent(String)`。
+  2 分類をまとめて **1 層** の Result にする。`Failure` は `Transient(TransientKind)` / `Permanent(DbErrorKind)`（`DbFailure` は旧名の alias）。
   テストと main はこれを使う
-- 各エフェクトの companion モジュールの `runWithResult(thunk): Result[String, a] \ ef - X`
-  （`DbErr.runWithResult` / `TransientDbErr.runWithResult`）。片方だけ値にして、もう片方は上へ流したいとき向け
+- 各エフェクトの companion モジュールの `runWithResult`（`DbErr.runWithResult: Result[DbErrorKind, a] \ ef - DbErr` /
+  `TransientDbErr.runWithResult: Result[TransientKind, a] \ ef - TransientDbErr`）。片方だけ値にして、もう片方は上へ流したいとき向け
 
 ログを出して終わるだけなら Result にせず `with handler DbErr { ... }` を直接書けばよい（Void 戻りの op は
 継続を呼ばないので、値の型は変わらない）。

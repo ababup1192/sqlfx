@@ -119,6 +119,16 @@ def testAttempt(): Unit \ Assert =
             Db.attempt(() -> DbErr.uniqueViolation("users_email_key"))
         })
 
+/// DbErr.runWithResult は kind をそのまま返す（TransientDbErr.runWithResult が TransientKind を返すのと同じ形）。
+@Test
+def testDbErrRunWithResultKeepsKind(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{Ok(1), Err(DbErrorKind.UniqueViolation("users_email_key"))},
+        List#{
+            DbErr.runWithResult(() -> 1),
+            DbErr.runWithResult(() -> DbErr.uniqueViolation("users_email_key"))
+        })
+
 /// Db.guard は JVM の例外を DbErr の Other にする。文言は message、無ければ class 名。StackOverflowError も Other。値はそのまま通る。
 @Test
 def testGuardTurnsExceptionsIntoOther(): Unit \ {Assert, IO} =
