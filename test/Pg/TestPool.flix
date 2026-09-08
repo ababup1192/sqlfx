@@ -1,3 +1,5 @@
+import java.lang.RuntimeException
+
 use SqlValue.SqlValue
 use DbError.DbFailure
 
@@ -71,6 +73,24 @@ def testPoolLazyTxRollsBackAndCommits(): Unit \ {Assert, IO} =
     }));
     Pool.close(pool);
     Assert.assertEq(expected = Ok((Err(DbFailure.Permanent("uniqueViolation sqlfx_test_users_email_key")), 0, 1)), result)
+
+/// thunk が JVM の例外を投げても、Tx は ROLLBACK され接続はプールに返る。
+///
+///   BEGIN  INSERT a  throw RuntimeException → ROLLBACK  … 0 行、active 0
+@Test
+def testPoolLazyTxRollsBackOnException(): Unit \ {Assert, IO} =
+    let pool = smallPool(1000);
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> {
+        Pool.withConnection(pool, _ -> resetUsers());
+        let failed: Result[DbFailure, Unit] = DbError.runWithFailure(() -> Pool.withLazyTx(pool, () -> {
+            discard Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('a', 'x@example.com', now())", Nil);
+            throw new RuntimeException("boom")
+        }));
+        let rows = Pool.withConnection(pool, _ -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
+        (failed |> Result.mapErr(failure -> "${failure}"), rows, Pool.stats(pool)#active)
+    }));
+    Pool.close(pool);
+    Assert.assertEq(expected = Ok((Err("Permanent(other boom)"), 0, 0)), result)
 
 /// onBegin は最初の SQL の前に同じ Tx で 1 回流れ、`set_config(..., true)` の印が thunk から見える。SQL を出さない thunk では流れない。
 ///

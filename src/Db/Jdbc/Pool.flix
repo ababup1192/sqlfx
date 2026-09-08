@@ -4,7 +4,9 @@
 ///
 mod Pool {
 
+    import java.lang.StackOverflowError
     import java.lang.Throwable
+    import java.lang.VirtualMachineError
     import java.sql.Connection
     import java.sql.SQLException
     import com.zaxxer.hikari.HikariConfig
@@ -216,6 +218,8 @@ mod Pool {
     /// 最初の SQL が来た時に初めて接続を借りて BEGIN し、thunk が終わったら COMMIT（失敗なら ROLLBACK）して返す。
     /// SQL を 1 本も出さない thunk はプールに触らない。GraphQL のリゾルバのように「DB を使うかもしれない」単位を
     /// 1 つの Tx にしたい所で使う。ネストは `withTx` と同じく未対応。
+    /// thunk が JVM の例外を投げても ROLLBACK して接続を返し、`DbErr` の `Other` として上げる
+    /// （`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出）。
     ///
     pub def withLazyTx(pool: Pool, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
         withLazyTxAfterBegin(pool, () -> (), thunk)
@@ -243,7 +247,7 @@ mod Pool {
                 }
             };
             let outcome = DbError.runWithKind(() ->
-                run thunk() with handler SqlRead {
+                run guarded(thunk) with handler SqlRead {
                     def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
                 } with handler SqlWrite {
                     def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(open(), sql, params)))
@@ -263,6 +267,54 @@ mod Pool {
                 case Err(kind) => DbError.raise(kind)
             }
         }
+
+    ///
+    /// thunk を走らせ、JVM の例外（Java interop、VerifyError、写しのコードの RuntimeException）を
+    /// `DbErr` に変えて返す。JVM 自体が壊れている物（`isFatal`）はそのまま再送出する。
+    ///
+    /// WhyNot: catch を `run … with handler SqlRead` の外に置かないのは、handler の外に置いた catch を
+    /// 例外が素通りするため（2026-09-08 に実測）。SQL を出した後に投げられた例外も拾えるよう、最内側に置く。
+    ///
+    /// WhyNot: catch の腕で op（`DbError.raise`）を直に呼ばないのは、JVM の VerifyError になるため。
+    /// 腕では値だけ返し、catch を抜けてから raise する。
+    ///
+    def guarded(thunk: Unit -> a \ ef): a \ ef + IO + {TransientDbErr, DbErr} =
+        let caught = try {
+            Ok(thunk())
+        } catch {
+            case error: Throwable => Err(error)
+        };
+        match caught {
+            case Ok(value)    => value
+            case Err(error)   =>
+                if (isFatal(error)) throw error
+                else DbError.raise(DbError.DbErrorKind.Other(describeThrowable(error)))
+        }
+
+    ///
+    /// 飲み込んではいけない物か。`VirtualMachineError`（OutOfMemoryError / InternalError）は true。
+    ///
+    /// WhyNot: StackOverflowError を fatal にしないのは、VirtualMachineError の子ではあるが 1 つの Tx の深い再帰で
+    /// 起きる物で、その Tx を巻き戻せば JVM は続けられるため。
+    ///
+    /// WhyNot: `instanceof` でなく throw して catch で分けるのは、Flix に型の判定式が無く、catch の並びなら
+    /// 子クラスを先に書けるため。
+    ///
+    def isFatal(error: Throwable): Bool \ IO =
+        try {
+            throw error
+        } catch {
+            case _: StackOverflowError  => false
+            case _: VirtualMachineError => true
+            case _: Throwable           => false
+        }
+
+    ///
+    /// 例外の 1 行。message があればそれ、null ならクラス名（VerifyError は message が null の事がある）。
+    ///
+    def describeThrowable(error: Throwable): String \ IO =
+        let message: String = error.getMessage();
+        if (Object.isNull(message)) error.getClass().getName() else message
 
     ///
     /// 決まった接続で thunk の SQL を流す（Tx の管理はしない）。
