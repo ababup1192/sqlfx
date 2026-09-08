@@ -1,3 +1,7 @@
+import java.lang.OutOfMemoryError
+import java.lang.RuntimeException
+import java.lang.StackOverflowError
+
 use DbError.DbErrorKind
 use DbError.TransientKind
 
@@ -114,3 +118,32 @@ def testAttempt(): Unit \ Assert =
             Db.attempt(() -> 1),
             Db.attempt(() -> DbErr.uniqueViolation("users_email_key"))
         })
+
+/// Db.guard は JVM の例外を DbErr の Other にする。文言は message、無ければ class 名。StackOverflowError も Other。値はそのまま通る。
+@Test
+def testGuardTurnsExceptionsIntoOther(): Unit \ {Assert, IO} =
+    let thunks: List[Unit -> Int32 \ IO] = List#{
+        () -> 1,
+        () -> throw new RuntimeException("boom"),
+        () -> throw new RuntimeException(),
+        () -> throw new StackOverflowError("deep")
+    };
+    Assert.assertEq(
+        expected = List#{
+            Ok(1),
+            Err(DbError.Failure.Permanent(DbErrorKind.Other("boom"))),
+            Err(DbError.Failure.Permanent(DbErrorKind.Other("java.lang.RuntimeException"))),
+            Err(DbError.Failure.Permanent(DbErrorKind.Other("deep")))
+        },
+        thunks |> List.map(thunk -> Db.attempt(() -> Db.guard(thunk))))
+
+/// VirtualMachineError（OutOfMemoryError）は Db.guard を素通りして再送出される。
+@Test
+def testGuardRethrowsFatal(): Unit \ {Assert, IO} =
+    let escaped = DbErr.runWithResult(() ->
+        try {
+            Db.guard(() -> throw new OutOfMemoryError("fake"))
+        } catch {
+            case _: OutOfMemoryError => true
+        });
+    Assert.assertEq(expected = Ok(true), escaped)

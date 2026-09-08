@@ -95,6 +95,35 @@ def testPoolLazyTxRollsBackOnException(): Unit \ {Assert, IO} =
     Pool.close(pool);
     Assert.assertEq(expected = Ok((Err(Failure.Permanent(DbErrorKind.Other("boom"))), 0, 0)), result)
 
+/// 利用側が thunk の中で張る業務エラーの handler（テスト用）。
+eff BizErr {
+    def fail(): Void
+}
+
+/// thunk の中で利用側が handler を張ると、ライブラリの catch はその内側に届かない。一番内側の handler の直下に
+/// Db.guard を置けば、例外は DbErr の Other として受けられ、ROLLBACK され接続はプールに返る。
+///
+///   BEGIN  INSERT a  [BizErr の handler [Db.guard: throw RuntimeException]] → ROLLBACK  … Other("boom")、0 行、active 0
+@Test
+def testPoolLazyTxGuardInsideUserHandler(): Unit \ {Assert, IO} =
+    let pool = smallPool(1000);
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> {
+        Pool.withConnection(pool, _ -> resetUsers());
+        let failed: Result[Failure, Result[String, Unit]] = DbError.runWithFailure(() -> Pool.withLazyTxResult(pool, () ->
+            run {
+                Ok(Db.guard(() -> {
+                    discard Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('a', 'x@example.com', now())", Nil);
+                    throw new RuntimeException("boom")
+                }))
+            } with handler BizErr {
+                def fail(_resume) = Err("biz")
+            }));
+        let rows = Pool.withConnection(pool, _ -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
+        (failed, rows, Pool.stats(pool)#active)
+    }));
+    Pool.close(pool);
+    Assert.assertEq(expected = Ok((Err(Failure.Permanent(DbErrorKind.Other("boom"))), 0, 0)), result)
+
 /// withLazyTxResult は thunk の Err で ROLLBACK して Err をそのまま返し、Ok なら COMMIT する。
 ///
 ///   BEGIN  INSERT a  Err("emailTaken") → ROLLBACK  … 0 行、Err がそのまま戻る
