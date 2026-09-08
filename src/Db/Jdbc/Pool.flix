@@ -318,7 +318,9 @@ mod Pool {
                     Tx.begin(found);
                     Ref.put(Some(found), slot);
                     // 印を置く SQL は開いたばかりの接続で流す（この時点で slot は埋まっているので、再帰しない）
-                    runOn(found, onBegin);
+                    // WhyNot: onBegin を Db.guard で包まないと、JVM の例外が handler の腕から抜けて ROLLBACK と返却が飛び、
+                    // 借りた接続が Tx を開いたまま漏れる（thunk の例外は最内側の Db.guard が受けるが、ここはその外）
+                    runOn(found, () -> Db.guard(onBegin));
                     found
                 }
             };
