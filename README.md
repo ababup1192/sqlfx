@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.3.1"
+"github:ababup1192/sqlfx" = "0.4.0"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -401,25 +401,118 @@ run { Blog.publishDue() } with TimeTest.runFrozen({ now = "2026-09-06T00:00:00Z"
 
 ## 6. エラーの扱い
 
-DB のエラーは 2 つのエフェクト。どちらの op も戻らない（`Void`）。
+DB のエラーは 2 つのエフェクト。op はどちらも `raise(kind)` の 1 本で、種類は `DbErrorKind` の値で渡す。op は戻らない（`Void`）。
 
-```
-TransientDbErr   deadlock / timeout / connectionLost         再実行で直りうる → withRetry
-DbErr            uniqueViolation / foreignKeyViolation /      直らない
-                 checkViolation / notNullViolation /
-                 schemaMismatch / decodeError / retryExhausted / other
+```flix
+pub eff TransientDbErr { def raise(kind: DbErrorKind): Void }   // 再実行で直りうる → withRetry
+pub eff DbErr          { def raise(kind: DbErrorKind): Void }   // 直らない
+
+pub enum TransientKind { case Deadlock, case Timeout(Int32), case ConnectionLost(String) }
+pub enum DbErrorKind {
+    case Transient(TransientKind)
+    case UniqueViolation(String), case ForeignKeyViolation(String), case CheckViolation(String)
+    case NotNullViolation(String), case SchemaMismatch(String), case DecodeError(String, String)
+    case RetryExhausted(TransientKind, Int32)   // 最後の失敗と、呼んだ回数
+    case Rollback                               // 業務の都合で巻き戻したい
+    case Other(String)
+}
 ```
 
-制約違反は制約名付き（`notNullViolation` だけ列名）。制約名は pgjdbc の `ServerErrorMessage` から取るので、PG のロケールに依存しない。
+投げる側は種類ごとの関数を使う（`DbErr.uniqueViolation(c)` / `DbErr.other(msg)` / `TransientDbErr.timeout(ms)` …）。
+自分でハンドラを書く側は 1 腕で済み、`DbErrorKind` に case が増えても壊れない。
+
+```flix
+run { ... } with handler DbErr {
+    def raise(kind, _resume) = Err(kind)
+}
+```
+
+制約違反は制約名付き（`NotNullViolation` だけ列名）。制約名は pgjdbc の `ServerErrorMessage` から取るので、PG のロケールに依存しない。
+
+境界（main / HTTP ハンドラ / テスト）で 1 層の `Result` にするのは `DbError.runWithFailure`。失敗は `Failure` で、kind をそのまま持つ。
+
+```flix
+pub enum Failure { case Transient(TransientKind), case Permanent(DbErrorKind) }
+
+match failure {
+    case Failure.Transient(_)                                   => unavailable()     // 503
+    case Failure.Permanent(DbErrorKind.UniqueViolation(name))   => conflict(name)    // 409
+    case Failure.Permanent(DbErrorKind.RetryExhausted(last, n)) => internalWith(last, n)
+    case Failure.Permanent(_)                                   => internal()        // 500
+}
+```
+
+人が読む 1 行は `DbError.describeFailure(failure)`（kind だけなら `DbError.describe(kind)`）。
+分類はこの match で書き、`describe` の文言では分けない。文言を変えた時に分類が黙って壊れる。
+
+### なぜ Result でなくエフェクトか
+
+1. **Tx の巻き戻しの経路が 1 つに絞れる。** 失敗が値で返ると、途中の関数が `Ok` に見える形で握れてしまい、
+   `withLazyTx` は COMMIT を出す。エフェクトなら handler まで一直線で、巻き戻しは `withLazyTx` の 1 か所で決まる
+2. **thunk の中を素の型で書ける。** `insertUser(row): Int64 \ DbWrite` のように、戻り値が業務の値のままなので
+   `Result` の入れ子と `forM` の連鎖が要らない
+3. **失敗を捨てられる場所が handler だけになる。** 「握り潰し」は `run … with handler` を書いた所にしか無いので、
+   grep で数えられる。`Result` だと `Result.getWithDefault` があちこちに散る
+
+値で受けたい所（バッチで 1 行ごとの結果を集める、失敗を数える）は `Db.attempt` の 1 本だけを通す。
+
+```flix
+rows |> List.map(row -> (row, Db.attempt(() -> UsersQueries.insertUser(row))))
+```
+
+`Db.attempt` は **Tx を巻き戻さない**。`withLazyTx` の thunk の中で使うと `Err` が普通の戻り値になって COMMIT される。
+Tx の外か `Pool.withConnection` の中で使い、Tx の中で失敗を値にしたいなら `Pool.withLazyTxResult`（下）。
+
+### Tx の中で業務エラーを受けて巻き戻す
+
+`Pool.withLazyTxResult(pool, thunk)` は `Result` を返す thunk を受け、`Err` なら ROLLBACK して **その `Err` をそのまま返す**。
+
+```flix
+// RegisterErr（業務エラーのエフェクト）を Tx の中で受け、Err なら巻き戻す
+DbError.runWithFailure(() ->
+    Pool.withLazyTxResult(pool, () -> RegisterErr.runWithResult(() -> registerUser(user))))
+//   : Result[Failure, Result[RegisterFailure, Int64]]
+```
+
+業務エラーを Tx の **外** で受けてはいけない。Flix のエフェクトは再開しない時に間の frame を捨てるだけで `finally` が無く、
+外で受けると `withLazyTx` の COMMIT / ROLLBACK と接続の返却が飛んで、接続が「idle in transaction」のまま漏れる。
+
+### 触ってはいけない形（実測）
+
+| 形 | 何が起きるか |
+|---|---|
+| `try { run … with handler X { … } } catch { … }` | handler の中や、op から再開した後に飛んだ例外が catch を素通りする。catch は handler の**内側**（最内側）に置く |
+| `catch { case e: Throwable => SomeEff.op(...) }` | JVM の VerifyError。catch の腕では値だけ返し、op は catch を抜けてから呼ぶ |
+| `def f(thunk: Unit -> a \ ef): a \ ef + DbErr` の `ef` に `DbErr` が来る | E6217。エフェクトが型変数の関数で同じエフェクトを declared にはできない |
+| resume しない handler で握り潰す | できるが、`Void` の op は resume できないので、その op の後ろは走らない |
+
+JVM の例外は型に出ない。`Pool.withLazyTx` は thunk の最内側で catch して `DbErr` の `Other` に変えるので、
+利用側で包み直す必要は無い（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出する）。
 
 `Pool.borrow`（接続を借りる段）の `TransientDbErr` は 2 つの意味に分かれる。
 
-- `timeout` … **プールの借り待ちの上限**。満杯（`active >= max`）で `borrowTimeoutMs` 待っても空かなかった。DB は生きている見込みで、遅い SQL か接続の漏れを疑う
-- `connectionLost` … **DB に届かない**。プールは空いているのに接続が作れなかった。DSN・ネットワーク・DB の停止を疑う
+- `Timeout` … **プールの借り待ちの上限**。満杯（`active >= max`）で `borrowTimeoutMs` 待っても空かなかった。DB は生きている見込みで、遅い SQL か接続の漏れを疑う
+- `ConnectionLost` … **DB に届かない**。プールは空いているのに接続が作れなかった。DSN・ネットワーク・DB の停止を疑う
 
 HikariCP はどちらでも同じ "request timed out" の文言を出すので、失敗した時点の `Pool.stats` と cause の連鎖で分ける
-（`java.net.ConnectException` / `java.net.SocketTimeoutException` / SQLState が `08` で始まる `PSQLException` があれば stats に関係なく `connectionLost`）。
+（`java.net.ConnectException` / `java.net.SocketTimeoutException` / SQLState が `08` で始まる `PSQLException` があれば stats に関係なく `ConnectionLost`）。
 判定は純粋な `Pool.borrowFailureKind(message, causes, sqlState, stats)`。
+
+### 0.3.x からの移行
+
+| 0.3.x | 0.4.0 |
+|---|---|
+| `DbErr.uniqueViolation(c)` など投げる関数 | 同じ（op から関数になっただけ） |
+| `with handler DbErr { def uniqueViolation(c, _) = … 8 腕 }` | `with handler DbErr { def raise(kind, _) = … }` の 1 腕 |
+| `DbErrorKind.Deadlock` / `.Timeout(ms)` / `.ConnectionLost(m)` | `DbErrorKind.Transient(TransientKind.Deadlock)` など |
+| `DbErrorKind.RetryExhausted("timeout 0 after 3 attempts")` | `DbErrorKind.RetryExhausted(TransientKind.Timeout(0), 3)` |
+| `DbErr.retryExhausted(last: String)` | `DbErr.retryExhausted(last: TransientKind, attempts: Int32)` |
+| `DbFailure.Transient(String)` / `DbFailure.Permanent(String)` | `Failure.Transient(TransientKind)` / `Failure.Permanent(DbErrorKind)`（型名 `DbFailure` は alias で残る） |
+| `"${failure}"` で文言を作る | `DbError.describeFailure(failure)` |
+| `TransientDbErr.runWithResult` が返す `Result[String, _]` | `Result[TransientKind, _]` |
+| `Pool.borrowFailureKind` が返す `DbErrorKind` | `TransientKind` |
+| 業務エラーで巻き戻す自前の sentinel + `Ref` | `Pool.withLazyTxResult` |
+| `withLazyTx` の thunk を自分で try/catch で包む | 不要（ライブラリが最内側で受ける） |
 
 ### 入力の制約は DDL に書く
 
@@ -512,6 +605,8 @@ Retry.withRetry(3, () ->                            // Transient なら thunk �
 ```
 
 `Pool.withLazyTx(pool, thunk)` は「最初の SQL が来た時に借りて BEGIN、終わったら COMMIT / ROLLBACK」。SQL を出さない thunk はプールに触らない。
+thunk が JVM の例外を投げても ROLLBACK して接続を返す（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出）。
+Tx の中で業務エラーを受けて巻き戻したいなら `Pool.withLazyTxResult`（「6. エラーの扱い」）。
 `Pool.withLazyTxAfterBegin(pool, onBegin, thunk)` は BEGIN の直後に onBegin を同じ Tx で 1 回流す。`SELECT set_config('app.project_id', $1, true)` のように RLS の印を置くのに使う。
 GraphQL のリゾルバのように、DB を使うかどうかが呼ぶまで分からない単位を 1 つの Tx にしたい所で使う。
 
@@ -525,6 +620,10 @@ CLI やテストのように 1 回だけ開くなら `Jdbc.withConnection(config
               ├─ attempt 2: withTx ─ BEGIN ─ DELETE ─ UPDATE ─ COMMIT ─▶ 値
               └─ 枯渇したら DbErr.retryExhausted
 ```
+
+**`withLazyTx` / `withRetryWith` の thunk の中に、DB 以外の副作用（HTTP の送信、ファイル、外部のエフェクト）を置かない。**
+再実行で thunk が丸ごとやり直されるので二重に走る。外に出したい副作用は outbox にする（同じ Tx に行を積み、別の tick が拾って送る）。
+型では止められないので、利用側で thunk のエフェクト集合を見張る（署名に `\ {Db, ...}` 以外の I/O 系のエフェクトが出たら疑う）。
 
 再実行は Tx 単位。PG はデッドロック後に Tx 全体が aborted になるので、文単位の再実行は意味を持たない。
 COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続は autocommit に戻る。ネストは v0 では未対応。
@@ -558,6 +657,11 @@ def poolIsHealthy(pool: Pool.Pool): Bool \ IO =
     let stats = Pool.stats(pool);
     stats#waiting == 0 and stats#active < stats#max
 ```
+
+`Pool.withConnectionTimeout(pool, borrowTimeoutMs, thunk)` は、この呼び出しだけの借り待ちの上限を付けた `withConnection`。
+上限までに借りられなければ `TransientDbErr` の `Timeout`。ping や health check のような「待ってまで欲しくない」借り方に使う
+（DB が止まっている間に `/health` が pool の `borrowTimeoutMs` ぶん待つと、Docker の HEALTHCHECK の方が先に切れる）。
+業務の Tx には使わない。そこで待ちが長いなら直すのは pool の設定の方で、待ち切っても仕事がやり直しになるだけ。
 
 `PoolConfig` の `leakDetectionThresholdMs`（既定 0 = 無効）を付けると、借りたまま返さない接続をその ms の後に HikariCP が SLF4J の warn に出す（スタックトレース付き）。
 HikariCP は 2000 未満を黙って無効にするので、0 でなければ 2000 以上に丸める。warn がどこへ出るかは利用側の SLF4J の束縛で決まる（`slf4j-nop` だと捨てられる。`slf4j-simple` などに替えると標準エラーへ）。
