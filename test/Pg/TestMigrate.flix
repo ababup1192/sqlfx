@@ -13,7 +13,7 @@ def resetMigrations(): Unit \ IO =
 
 def runMigrate(thunk: Unit -> a \ ef): Result[String, a] \ (ef - {Migrate.MigrateErr, TransientDbErr, DbErr, Fs.ReadFile.ReadFile, Fs.FileRead.FileRead, Fs.DirList.DirList}) + IO =
     let outcome = run {
-        Migrate.runWithResult(() -> DbError.runWithFailure(thunk) |> Result.mapErr(failure -> "${failure}"))
+        Migrate.runWithResult(() -> DbError.runWithFailure(thunk) |> Result.mapErr(DbError.describeFailure))
     } with Fs.ReadFile.runWithFileRead
       with Fs.FileRead.runWithIO
       with Fs.DirList.runWithIO;
@@ -74,7 +74,7 @@ def testMigrateStopsAtFirstFailure(): Unit \ {Assert, IO} =
     resetMigrations();
     let broken = "test/fixtures/broken_migrations";
     let outcome = runMigrate(() -> Migrate.apply(Migrate.defaultConfig(pgConfig()), broken))
-        |> Result.mapErr(message -> String.startsWith(prefix = "Permanent(schemaMismatch", message));
+        |> Result.mapErr(message -> String.startsWith(prefix = "schemaMismatch", message));
     let statuses = runMigrate(() -> Jdbc.withConnection(pgConfig(), conn -> Migrate.status(conn, broken)))
         |> Result.map(List.map(status -> match status { case Status.Applied(version, _, _) => (version, true) case Status.Pending(version) => (version, false) }));
     Assert.assertEq(

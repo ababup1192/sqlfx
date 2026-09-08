@@ -84,7 +84,7 @@ def testPgUniqueViolation(): Unit \ {Assert, IO} =
 @Test
 def testPgMissingTableIsSchemaMismatch(): Unit \ {Assert, IO} =
     let result = withPg(() -> Sql.fetch("SELECT 1 FROM sqlfx_no_such_table", Nil) |> List.length)
-        |> Result.mapErr(failure -> String.startsWith(prefix = "Permanent(schemaMismatch", "${failure}"));
+        |> Result.mapErr(failure -> String.startsWith(prefix = "schemaMismatch", DbError.describeFailure(failure)));
     Assert.assertEq(expected = Err(true), result)
 
 /// ExampleUsers のユースケースが、テーブル名を合わせれば実 PG でもそのまま動く形であることの確認。
@@ -237,7 +237,7 @@ def testPgDecodeErrorIsDbErr(): Unit \ {Assert, IO} =
 @Test
 def testPgWithConnectionClosesOnError(): Unit \ {Assert, IO} =
     let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Jdbc.withConnection(pgConfig(), _ -> Sql.fetch("SELECT 1 FROM sqlfx_no_such_table", Nil))))
-        |> Result.mapErr(failure -> String.startsWith(prefix = "Permanent(schemaMismatch", "${failure}"))
+        |> Result.mapErr(failure -> String.startsWith(prefix = "schemaMismatch", DbError.describeFailure(failure)))
         |> Result.map(List.length);
     Assert.assertEq(expected = Err(true), result)
 
