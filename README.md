@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.1.0"
+"github:ababup1192/sqlfx" = "0.3.0"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -519,9 +519,46 @@ CLI やテストのように 1 回だけ開くなら `Jdbc.withConnection(config
 再実行は Tx 単位。PG はデッドロック後に Tx 全体が aborted になるので、文単位の再実行は意味を持たない。
 COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続は autocommit に戻る。ネストは v0 では未対応。
 
+### 待ってから呼び直す（backoff と jitter）
+
+`withRetry` は待たずに即呼び直すので、DB が再起動している数秒の間は attempts をすぐ使い切る。
+`Retry.withRetryWith(policy, wait, jitter, thunk)` は失敗のたびに `wait(backoffMs(policy, attempt, jitter()))` してから呼び直す（最後の失敗の後は待たない）。
+待ちは full jitter: 上限 `min(maxMs, baseMs * 2^(attempt-1))` に 0.0〜1.0 の乱数を掛ける。同時に失敗したリクエストが同じ時刻に揃って戻るのを避ける。
+
+```flix
+/// 乱数の jitter。ラムダ `() -> Math.Random.randomFloat64()` でも良い
+def jitter(): Float64 \ Math.Random.Random = Math.Random.randomFloat64()
+
+def countRows(pool: Pool.Pool): Int32 \ {IO, DbErr, RawSql} =
+    Math.Random.runWithIO(() ->
+        Retry.withRetryWith(Retry.defaultPolicy(), Retry.sleepMs, jitter, () ->   // 3 回、100 ms から 2 倍ずつ、2 秒で頭打ち
+            Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))
+```
+
+`Retry.Policy` は `{ attempts = Int32, baseMs = Int32, maxMs = Int32 }`、`Retry.defaultPolicy()` は `{ attempts = 3, baseMs = 100, maxMs = 2000 }`。
+`Retry.sleepMs` は Thread.sleep の包み（割り込まれたら残りを待たない）。`Retry.backoffMs(policy, attempt, jitter)` は純粋なので、テストは待った ms を記録するだけの wait と固定の jitter で回せる。
+
+### プールの数字と漏れの検出
+
+`Pool.stats(pool)` は `{ active, idle, waiting, total, max }`（HikariCP の MXBean と `maxConnections`）。`/health` で枯渇（`waiting > 0`、`active == max`）を見る。
+まだ 1 本も開いていない時や閉じた後は全部 0（`max` だけ設定値）。
+
+```flix
+def poolIsHealthy(pool: Pool.Pool): Bool \ IO =
+    let stats = Pool.stats(pool);
+    stats#waiting == 0 and stats#active < stats#max
+```
+
+`PoolConfig` の `leakDetectionThresholdMs`（既定 0 = 無効）を付けると、借りたまま返さない接続をその ms の後に HikariCP が SLF4J の warn に出す（スタックトレース付き）。
+HikariCP は 2000 未満を黙って無効にするので、0 でなければ 2000 以上に丸める。warn がどこへ出るかは利用側の SLF4J の束縛で決まる（`slf4j-nop` だと捨てられる。`slf4j-simple` などに替えると標準エラーへ）。
+
+```flix
+let pool = Pool.open({ leakDetectionThresholdMs = 10000 | Pool.defaultConfig(config) });
+```
+
 ### Web から使うときの前提
 
-- 縁（全ハンドラ共通）で `DbError.runWithFailure`（→ 500 / 503）、`Retry.withRetry`、`Pool.withConnection`、`RawSql.runWithAllow` を重ね、ハンドラごとに書くのは検証と Tx の範囲と制約違反の翻訳
+- 縁（全ハンドラ共通）で `DbError.runWithFailure`（→ 500 / 503）、`Retry.withRetryWith`、`Pool.withConnection`、`RawSql.runWithAllow` を重ね、ハンドラごとに書くのは検証と Tx の範囲と制約違反の翻訳
 - 業務エラー（`RegisterErr` のようなエフェクト）は service 層で翻訳し、controller のハンドラで HTTP のステータスに写す。検証（`Validation`）のエラーと同じ型にまとめる例が `examples/blog/src/BlogForm.flix`
 - 発行 SQL と件数の記録は `DbTest.runLogging` を縁に被せる。`statement_timeout` の口は未実装
 
