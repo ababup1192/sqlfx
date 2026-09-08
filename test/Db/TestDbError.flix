@@ -104,3 +104,13 @@ def testDescribeFailure(): Unit \ Assert =
             DbError.describeFailure(DbError.Failure.Transient(TransientKind.Deadlock)),
             DbError.describeFailure(DbError.Failure.Permanent(DbErrorKind.UniqueViolation("users_email_key")))
         })
+
+/// Db.attempt は DB の失敗を値にする。成功はそのまま Ok。
+@Test
+def testAttempt(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{Ok(1), Err(DbError.Failure.Permanent(DbErrorKind.UniqueViolation("users_email_key")))},
+        List#{
+            Db.attempt(() -> 1),
+            Db.attempt(() -> DbErr.uniqueViolation("users_email_key"))
+        })

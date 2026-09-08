@@ -301,3 +301,23 @@ mod DbErr {
         }
 
 }
+
+mod Db {
+
+    ///
+    /// DB の失敗を値で受ける。`Result` が欲しい所（バッチで 1 行ごとの結果を集める、失敗を数える）用の唯一の入口。
+    ///
+    /// ```
+    /// rows |> List.map(row -> (row, Db.attempt(() -> UsersQueries.insertUser(row))))
+    /// ```
+    ///
+    /// WhyNot: クエリごとに `tryXxx` を生成しないのは、Tx の中で使うと COMMIT される入口を生成物の数だけ増やすため。
+    /// 値で受けたい所は 1 本のこれを通す。
+    ///
+    /// attempt は Tx を巻き戻さない。`withLazyTx` の thunk の中で使うと `Err` が普通の戻り値になって COMMIT される。
+    /// Tx の外か `withConnection` の中で使い、Tx の中で失敗を値にしたいなら `Pool.withLazyTxResult`。
+    ///
+    pub def attempt(thunk: Unit -> a \ ef): Result[DbError.Failure, a] \ ef - {TransientDbErr, DbErr} =
+        DbError.runWithFailure(thunk)
+
+}
