@@ -68,7 +68,7 @@ def testRegisterUserPassesOtherErrorsThrough(): Unit \ Assert =
     let unknownConstraint = DbTest.runFailingWrite(DbErrorKind.CheckViolation("users_added_by_hand"), register);
     let schema = DbTest.runFailingWrite(DbErrorKind.SchemaMismatch("relation users does not exist"), register);
     Assert.assertEq(
-        expected = (Err(DbError.DbFailure.Permanent("checkViolation users_added_by_hand")), Err(DbError.DbFailure.Permanent("schemaMismatch relation users does not exist"))),
+        expected = (Err(DbError.Failure.Permanent(DbErrorKind.CheckViolation("users_added_by_hand"))), Err(DbError.Failure.Permanent(DbErrorKind.SchemaMismatch("relation users does not exist")))),
         (unknownConstraint, schema))
 
 // ---- HTTP の境界の見本（BlogForm）----

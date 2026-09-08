@@ -23,7 +23,7 @@ def testRawUsersWithPostsTwoQueries(): Unit \ Assert =
 def testRawDecodeErrorIsDbErr(): Unit \ Assert =
     let rows = Row.makeRows(List#{"id"}, List#{List#{SqlValue.Int64(1i64)}});
     let result = DbTest.runWithRows(rows, () -> RawSql.runWithAllow(() -> DbError.runWithFailure(() -> BlogRaw.findUserByEmail("x"))));
-    Assert.assertEq(expected = Err(DbError.DbFailure.Permanent("name: column 'name' is missing")), result |> Result.map(_ -> ()))
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbError.DbErrorKind.DecodeError("name", "column 'name' is missing"))), result |> Result.map(_ -> ()))
 
 /// 汚染データ: name に数値が入った行を Decoder.attempt で読むと、その列だけ Err になり行は落ちない。
 ///

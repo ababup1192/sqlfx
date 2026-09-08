@@ -1,4 +1,5 @@
-use DbError.DbFailure
+use DbError.DbErrorKind
+use DbError.Failure
 
 // 生 SQL 版（BlogRaw）を実 PostgreSQL で通しで動かす。生成コード版と同じ筋書き。
 
@@ -41,4 +42,4 @@ def testRawPgTxRollback(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
         }));
         (removed, failed, BlogRaw.countPosts())
     });
-    Assert.assertEq(expected = Ok((true, Err(DbFailure.Permanent("foreignKeyViolation posts_user_id_fkey")), 0i64)), result)
+    Assert.assertEq(expected = Ok((true, Err(Failure.Permanent(DbErrorKind.ForeignKeyViolation("posts_user_id_fkey"))), 0i64)), result)
