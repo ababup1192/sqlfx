@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.4.1"
+"github:ababup1192/sqlfx" = "0.4.2"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -552,6 +552,14 @@ HikariCP はどちらでも同じ "request timed out" の文言を出すので�
 |---|---|
 | `DbErr.runWithResult` が返す `Result[String, _]` | `Result[DbErrorKind, _]`（文言は `DbError.describe(kind)`） |
 | thunk の中で handler を張った内側の try/catch を自前で書く | `Db.guard(thunk)`（上の「触ってはいけない形」） |
+
+### 0.4.1 からの移行
+
+| 0.4.1 | 0.4.2 |
+|---|---|
+| Tx の中で SQL が落ちた後に thunk が値を返すと `Ok`（行は残らない） | ROLLBACK して `DbErr.rollback`（`DbErrorKind.Rollback`） |
+| 55P03（lock_timeout）/ 57P01（admin_shutdown）が `Other` | `Transient(Timeout(0))` / `Transient(ConnectionLost)`。`withRetry` が呼び直す |
+| `withLazyTxAfterBegin` の onBegin の JVM 例外で接続が漏れる | thunk と同じく `Other` になり、ROLLBACK して返る |
 
 ### 入力の制約は DDL に書く
 
