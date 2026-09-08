@@ -466,8 +466,11 @@ match failure {
 rows |> List.map(row -> (row, Db.attempt(() -> UsersQueries.insertUser(row))))
 ```
 
-`Db.attempt` は **Tx を巻き戻さない**。`withLazyTx` の thunk の中で使うと `Err` が普通の戻り値になって COMMIT される。
-Tx の外か `Pool.withConnection` の中で使い、Tx の中で失敗を値にしたいなら `Pool.withLazyTxResult`（下）。
+`Db.attempt` は **Tx を巻き戻さない**。`withLazyTx` の thunk の中で使い、`Err` が DB の失敗（SQL がサーバで落ちた物）なら
+PG の Tx はその時点で aborted になり、後の SQL は全部 25P02 で失敗し、thunk が値を返しても COMMIT されず `withLazyTx` は
+`DbErr.rollback`（`DbErrorKind.Rollback`）で返る。DB に届く前の失敗（`Rollback` / `DecodeError` / 効果で投げただけの物）なら Tx は生きていて、
+`Err` は普通の戻り値になって COMMIT される。どちらも意図した形にはならないので、Tx の外か `Pool.withConnection` の中で使い、
+Tx の中で失敗を値にしたいなら `Pool.withLazyTxResult`（下）。
 
 ### Tx の中で業務エラーを受けて巻き戻す
 
