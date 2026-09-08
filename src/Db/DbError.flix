@@ -1,35 +1,22 @@
 ///
 /// 一時障害。Tx 境界ごと再実行すれば回復しうる。インフラ層の withRetry で捌く。
+/// op は 1 つで、種類は `DbErrorKind` の値で渡す（`isTransient` が true の case だけを渡す約束）。
+/// 投げるのは `TransientDbErr.deadlock()` のような関数（`mod TransientDbErr`）。
+///
+/// WhyNot: 種類ごとに op を分けないのは、case を 1 つ足すたびに「素通しするだけ」の handler まで含めて
+/// 利用側の全 handler がコンパイルエラーになるため。壊れる範囲を「網羅 match を書いた所」だけに縮める。
 ///
 pub eff TransientDbErr {
-    def deadlock(): Void
-    /// statement_timeout 等。ms は分かるときだけ、分からなければ 0
-    def timeout(ms: Int32): Void
-    def connectionLost(msg: String): Void
+    def raise(kind: DbError.DbErrorKind): Void
 }
 
 ///
 /// 再実行しても直らない DB エラー。制約違反はアプリが分岐したければハンドラで拾い、それ以外は main でログを出して終了する。
+/// op は 1 つで、種類は `DbErrorKind` の値で渡す（`isTransient` が false の case だけを渡す約束）。
+/// 投げるのは `DbErr.uniqueViolation(constraint)` のような関数（`mod DbErr`）。
 ///
 pub eff DbErr {
-    /// unique 制約違反（制約名）
-    def uniqueViolation(constraint: String): Void
-    /// 外部キー制約違反（制約名）
-    def foreignKeyViolation(constraint: String): Void
-    /// CHECK 制約違反（制約名）
-    def checkViolation(constraint: String): Void
-    /// NOT NULL 違反（列名）。生成された関数の引数の型が守るので、生 SQL か UPDATE で NULL を書いたときに出る
-    def notNullViolation(column: String): Void
-    /// テーブルや列が無い = デプロイミス
-    def schemaMismatch(detail: String): Void
-    /// 結果セットの列が期待した型で読めない
-    def decodeError(column: String, detail: String): Void
-    /// withRetry が枯渇した。last は最後の失敗の説明
-    def retryExhausted(last: String): Void
-    /// 業務の都合で Tx を巻き戻したい。DB の失敗ではない
-    def rollback(): Void
-    /// 上のどれにも当てはまらない DB エラー（sqlstate とメッセージ）
-    def other(detail: String): Void
+    def raise(kind: DbError.DbErrorKind): Void
 }
 
 ///
@@ -73,20 +60,8 @@ mod DbError {
     ///
     /// 値を対応する op として投げる。戻らない。
     ///
-    pub def raise(kind: DbErrorKind): a \ {TransientDbErr, DbErr} = match kind {
-        case DbErrorKind.Deadlock => TransientDbErr.deadlock()
-        case DbErrorKind.Timeout(ms) => TransientDbErr.timeout(ms)
-        case DbErrorKind.ConnectionLost(msg) => TransientDbErr.connectionLost(msg)
-        case DbErrorKind.UniqueViolation(constraint) => DbErr.uniqueViolation(constraint)
-        case DbErrorKind.ForeignKeyViolation(constraint) => DbErr.foreignKeyViolation(constraint)
-        case DbErrorKind.CheckViolation(constraint) => DbErr.checkViolation(constraint)
-        case DbErrorKind.NotNullViolation(column) => DbErr.notNullViolation(column)
-        case DbErrorKind.SchemaMismatch(detail) => DbErr.schemaMismatch(detail)
-        case DbErrorKind.DecodeError(column, detail) => DbErr.decodeError(column, detail)
-        case DbErrorKind.RetryExhausted(last) => DbErr.retryExhausted(last)
-        case DbErrorKind.Rollback => DbErr.rollback()
-        case DbErrorKind.Other(detail) => DbErr.other(detail)
-    }
+    pub def raise(kind: DbErrorKind): a \ {TransientDbErr, DbErr} =
+        if (isTransient(kind)) TransientDbErr.raise(kind) else DbErr.raise(kind)
 
     ///
     /// 2 つのエフェクトをまとめて値に落とす唯一のハンドラ。他の「Result にする」関数はこれから作る。
@@ -95,19 +70,9 @@ mod DbError {
         run {
             Ok(thunk())
         } with handler TransientDbErr {
-            def deadlock(_resume) = Err(DbErrorKind.Deadlock)
-            def timeout(ms, _resume) = Err(DbErrorKind.Timeout(ms))
-            def connectionLost(msg, _resume) = Err(DbErrorKind.ConnectionLost(msg))
+            def raise(kind, _resume) = Err(kind)
         } with handler DbErr {
-            def uniqueViolation(constraint, _resume) = Err(DbErrorKind.UniqueViolation(constraint))
-            def foreignKeyViolation(constraint, _resume) = Err(DbErrorKind.ForeignKeyViolation(constraint))
-            def checkViolation(constraint, _resume) = Err(DbErrorKind.CheckViolation(constraint))
-            def notNullViolation(column, _resume) = Err(DbErrorKind.NotNullViolation(column))
-            def schemaMismatch(detail, _resume) = Err(DbErrorKind.SchemaMismatch(detail))
-            def decodeError(column, detail, _resume) = Err(DbErrorKind.DecodeError(column, detail))
-            def retryExhausted(last, _resume) = Err(DbErrorKind.RetryExhausted(last))
-            def rollback(_resume) = Err(DbErrorKind.Rollback)
-            def other(detail, _resume) = Err(DbErrorKind.Other(detail))
+            def raise(kind, _resume) = Err(kind)
         }
 
     ///
@@ -186,6 +151,23 @@ mod DbError {
 
 mod TransientDbErr {
 
+    use DbError.DbErrorKind
+
+    ///
+    /// デッドロック（PG は 40001 / 40P01）。
+    ///
+    pub def deadlock(): a \ TransientDbErr = TransientDbErr.raise(DbErrorKind.Deadlock)
+
+    ///
+    /// statement_timeout 等。ms は分かるときだけ、分からなければ 0。
+    ///
+    pub def timeout(ms: Int32): a \ TransientDbErr = TransientDbErr.raise(DbErrorKind.Timeout(ms))
+
+    ///
+    /// 接続が切れた・届かない。
+    ///
+    pub def connectionLost(msg: String): a \ TransientDbErr = TransientDbErr.raise(DbErrorKind.ConnectionLost(msg))
+
     ///
     /// TransientDbErr だけを Result に落とす。DbErr は上へ流したまま。withRetry が使う。
     ///
@@ -193,14 +175,59 @@ mod TransientDbErr {
         run {
             Ok(thunk())
         } with handler TransientDbErr {
-            def deadlock(_resume) = Err(DbError.describe(DbError.DbErrorKind.Deadlock))
-            def timeout(ms, _resume) = Err(DbError.describe(DbError.DbErrorKind.Timeout(ms)))
-            def connectionLost(msg, _resume) = Err(DbError.describe(DbError.DbErrorKind.ConnectionLost(msg)))
+            def raise(kind, _resume) = Err(DbError.describe(kind))
         }
 
 }
 
 mod DbErr {
+
+    use DbError.DbErrorKind
+
+    ///
+    /// unique 制約違反（制約名）。
+    ///
+    pub def uniqueViolation(constraint: String): a \ DbErr = DbErr.raise(DbErrorKind.UniqueViolation(constraint))
+
+    ///
+    /// 外部キー制約違反（制約名）。
+    ///
+    pub def foreignKeyViolation(constraint: String): a \ DbErr = DbErr.raise(DbErrorKind.ForeignKeyViolation(constraint))
+
+    ///
+    /// CHECK 制約違反（制約名）。
+    ///
+    pub def checkViolation(constraint: String): a \ DbErr = DbErr.raise(DbErrorKind.CheckViolation(constraint))
+
+    ///
+    /// NOT NULL 違反（列名）。生成された関数の引数の型が守るので、生 SQL か UPDATE で NULL を書いたときに出る。
+    ///
+    pub def notNullViolation(column: String): a \ DbErr = DbErr.raise(DbErrorKind.NotNullViolation(column))
+
+    ///
+    /// テーブルや列が無い = デプロイミス。
+    ///
+    pub def schemaMismatch(detail: String): a \ DbErr = DbErr.raise(DbErrorKind.SchemaMismatch(detail))
+
+    ///
+    /// 結果セットの列が期待した型で読めない。
+    ///
+    pub def decodeError(column: String, detail: String): a \ DbErr = DbErr.raise(DbErrorKind.DecodeError(column, detail))
+
+    ///
+    /// withRetry が枯渇した。last は最後の失敗の説明。
+    ///
+    pub def retryExhausted(last: String): a \ DbErr = DbErr.raise(DbErrorKind.RetryExhausted(last))
+
+    ///
+    /// 業務の都合で Tx を巻き戻したい。DB の失敗ではない。値で受けたいなら `Pool.withLazyTxResult`。
+    ///
+    pub def rollback(): a \ DbErr = DbErr.raise(DbErrorKind.Rollback)
+
+    ///
+    /// 上のどれにも当てはまらない DB エラー（sqlstate とメッセージ）。
+    ///
+    pub def other(detail: String): a \ DbErr = DbErr.raise(DbErrorKind.Other(detail))
 
     ///
     /// DbErr だけを Result に落とす。Transient は上へ流したまま、DbErr だけ値にしたいときに使う。
@@ -209,15 +236,7 @@ mod DbErr {
         run {
             Ok(thunk())
         } with handler DbErr {
-            def uniqueViolation(constraint, _resume) = Err(DbError.describe(DbError.DbErrorKind.UniqueViolation(constraint)))
-            def foreignKeyViolation(constraint, _resume) = Err(DbError.describe(DbError.DbErrorKind.ForeignKeyViolation(constraint)))
-            def checkViolation(constraint, _resume) = Err(DbError.describe(DbError.DbErrorKind.CheckViolation(constraint)))
-            def notNullViolation(column, _resume) = Err(DbError.describe(DbError.DbErrorKind.NotNullViolation(column)))
-            def schemaMismatch(detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.SchemaMismatch(detail)))
-            def decodeError(column, detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.DecodeError(column, detail)))
-            def retryExhausted(last, _resume) = Err(DbError.describe(DbError.DbErrorKind.RetryExhausted(last)))
-            def rollback(_resume) = Err(DbError.describe(DbError.DbErrorKind.Rollback))
-            def other(detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.Other(detail)))
+            def raise(kind, _resume) = Err(DbError.describe(kind))
         }
 
 }
