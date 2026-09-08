@@ -26,6 +26,8 @@ pub eff DbErr {
     def decodeError(column: String, detail: String): Void
     /// withRetry が枯渇した。last は最後の失敗の説明
     def retryExhausted(last: String): Void
+    /// 業務の都合で Tx を巻き戻したい。DB の失敗ではない
+    def rollback(): Void
     /// 上のどれにも当てはまらない DB エラー（sqlstate とメッセージ）
     def other(detail: String): Void
 }
@@ -53,6 +55,8 @@ mod DbError {
         case SchemaMismatch(String)
         case DecodeError(String, String)
         case RetryExhausted(String)
+        /// 業務の都合で Tx を巻き戻したい。値で受けたいなら `Pool.withLazyTxResult`
+        case Rollback
         case Other(String)
     }
 
@@ -80,6 +84,7 @@ mod DbError {
         case DbErrorKind.SchemaMismatch(detail) => DbErr.schemaMismatch(detail)
         case DbErrorKind.DecodeError(column, detail) => DbErr.decodeError(column, detail)
         case DbErrorKind.RetryExhausted(last) => DbErr.retryExhausted(last)
+        case DbErrorKind.Rollback => DbErr.rollback()
         case DbErrorKind.Other(detail) => DbErr.other(detail)
     }
 
@@ -101,6 +106,7 @@ mod DbError {
             def schemaMismatch(detail, _resume) = Err(DbErrorKind.SchemaMismatch(detail))
             def decodeError(column, detail, _resume) = Err(DbErrorKind.DecodeError(column, detail))
             def retryExhausted(last, _resume) = Err(DbErrorKind.RetryExhausted(last))
+            def rollback(_resume) = Err(DbErrorKind.Rollback)
             def other(detail, _resume) = Err(DbErrorKind.Other(detail))
         }
 
@@ -118,6 +124,7 @@ mod DbError {
         case DbErrorKind.SchemaMismatch(_) => None
         case DbErrorKind.DecodeError(_, _) => None
         case DbErrorKind.RetryExhausted(_) => None
+        case DbErrorKind.Rollback => None
         case DbErrorKind.Other(_) => None
     }
 
@@ -168,6 +175,7 @@ mod DbError {
         case DbErrorKind.SchemaMismatch(detail) => "schemaMismatch ${detail}"
         case DbErrorKind.DecodeError(column, detail) => "${column}: ${detail}"
         case DbErrorKind.RetryExhausted(last) => "retryExhausted ${last}"
+        case DbErrorKind.Rollback => "rollback"
         case DbErrorKind.Other(detail) => "other ${detail}"
     }
 
@@ -208,6 +216,7 @@ mod DbErr {
             def schemaMismatch(detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.SchemaMismatch(detail)))
             def decodeError(column, detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.DecodeError(column, detail)))
             def retryExhausted(last, _resume) = Err(DbError.describe(DbError.DbErrorKind.RetryExhausted(last)))
+            def rollback(_resume) = Err(DbError.describe(DbError.DbErrorKind.Rollback))
             def other(detail, _resume) = Err(DbError.describe(DbError.DbErrorKind.Other(detail)))
         }
 

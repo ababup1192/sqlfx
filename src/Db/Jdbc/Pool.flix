@@ -233,6 +233,30 @@ mod Pool {
     /// BEGIN の後でないと効かず、プールに返した接続へ印が残る事も無いため。
     ///
     pub def withLazyTxAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + (ef2 - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        match withLazyTxResultAfterBegin(pool, onBegin, () -> Ok(thunk())) {
+            case Ok(value) => value
+            // WhyNot: この腕を書くのは、e が型変数のままで match が網羅を求めるため。Err は上の `Ok(...)` からは作られない
+            case Err(_)    => bug!("withLazyTxAfterBegin: Err は作られない")
+        }
+
+    ///
+    /// `withLazyTx` の Result 版。thunk が `Ok` を返したら COMMIT して `Ok`、`Err` を返したら ROLLBACK して
+    /// その `Err` をそのまま返す。業務エラーを Tx の中で受けて巻き戻したい所で使う。
+    ///
+    /// ```
+    /// Pool.withLazyTxResult(pool, () -> RegisterErr.runWithResult(thunk))
+    /// ```
+    ///
+    /// WhyNot: 業務エラーを Tx の外で受けないのは、Flix の effect は再開しない時に間の frame を捨てるだけで
+    /// finally が無く、外で受けると COMMIT / ROLLBACK と接続の返却が飛んで接続が漏れるため。
+    ///
+    pub def withLazyTxResult(pool: Pool, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        withLazyTxResultAfterBegin(pool, () -> (), thunk)
+
+    ///
+    /// `withLazyTxResult` に加えて、BEGIN の直後に onBegin を同じ Tx で 1 回だけ流す（`withLazyTxAfterBegin` と同じ）。
+    ///
+    pub def withLazyTxResultAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite}) + (ef2 - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
         region rc {
             let slot = Ref.fresh(rc, None);
             def open() = match Ref.get(slot) {
@@ -254,13 +278,14 @@ mod Pool {
                     def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
                 });
             let finished = match (Ref.get(slot), outcome) {
-                case (None, _)             => outcome
-                case (Some(found), Ok(_))  => {
+                case (None, _)                => outcome
+                case (Some(found), Ok(Ok(_))) => {
                     let committed = DbError.runWithKind(() -> Tx.commit(found));
                     Jdbc.close(found);
                     Result.flatMap(_ -> outcome, committed)
                 }
-                case (Some(found), Err(_)) => { Tx.rollback(found); Jdbc.close(found); outcome }
+                // thunk の Err（業務エラー）も DbErr も巻き戻す
+                case (Some(found), _)         => { Tx.rollback(found); Jdbc.close(found); outcome }
             };
             match finished {
                 case Ok(value) => value

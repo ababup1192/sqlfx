@@ -92,6 +92,30 @@ def testPoolLazyTxRollsBackOnException(): Unit \ {Assert, IO} =
     Pool.close(pool);
     Assert.assertEq(expected = Ok((Err("Permanent(other boom)"), 0, 0)), result)
 
+/// withLazyTxResult は thunk の Err で ROLLBACK して Err をそのまま返し、Ok なら COMMIT する。
+///
+///   BEGIN  INSERT a  Err("emailTaken") → ROLLBACK  … 0 行、Err がそのまま戻る
+///   BEGIN  INSERT b  Ok(())            → COMMIT    … 1 行
+@Test
+def testPoolLazyTxResultKeepsErrAndRollsBack(): Unit \ {Assert, IO} =
+    let pool = smallPool(1000);
+    let countRows = () -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT id FROM sqlfx_test_users", Nil) |> List.length);
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> {
+        Pool.withConnection(pool, _ -> resetUsers());
+        let failed: Result[String, Unit] = Pool.withLazyTxResult(pool, () -> {
+            discard Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('a', 'a@example.com', now())", Nil);
+            Err("emailTaken")
+        });
+        let afterErr = countRows();
+        let committed: Result[String, Unit] = Pool.withLazyTxResult(pool, () -> {
+            discard Sql.execute("INSERT INTO sqlfx_test_users (name, email, created_at) VALUES ('b', 'b@example.com', now())", Nil);
+            Ok(())
+        });
+        (failed, afterErr, committed, countRows())
+    }));
+    Pool.close(pool);
+    Assert.assertEq(expected = Ok((Err("emailTaken"), 0, Ok(()), 1)), result)
+
 /// onBegin は最初の SQL の前に同じ Tx で 1 回流れ、`set_config(..., true)` の印が thunk から見える。SQL を出さない thunk では流れない。
 ///
 ///   BEGIN  set_config('app.tenant', '7')  SELECT current_setting  → '7'
