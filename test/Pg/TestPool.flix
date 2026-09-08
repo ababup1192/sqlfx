@@ -1,4 +1,5 @@
 import java.lang.RuntimeException
+import java.lang.System
 
 use SqlValue.SqlValue
 use DbError.DbErrorKind
@@ -39,7 +40,7 @@ def testPoolClosedIsConnectionLost(): Unit \ {Assert, IO} =
     let pool = smallPool(1000);
     Pool.close(pool);
     let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))
-        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(ConnectionLost", "${failure}"));
+        |> Result.mapErr(failure -> String.startsWith(prefix = "connectionLost", DbError.describeFailure(failure)));
     Assert.assertEq(expected = Err(true), result)
 
 // ---- withLazyTx ----
@@ -159,6 +160,32 @@ def testPoolStatsFollowBorrowAndReturn(): Unit \ {Assert, IO} =
 def testPoolUnreachableIsConnectionLost(): Unit \ {Assert, IO} =
     let pool = Pool.open({ maxConnections = 2, borrowTimeoutMs = 250 | Pool.defaultConfig({ url = "jdbc:postgresql://127.0.0.1:1/none", user = "none", password = "none" }) });
     let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))
-        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(ConnectionLost", "${failure}"));
+        |> Result.mapErr(failure -> String.startsWith(prefix = "connectionLost", DbError.describeFailure(failure)));
     Pool.close(pool);
     Assert.assertEq(expected = Err(true), result)
+
+// ---- withConnectionTimeout ----
+
+/// 呼び出しごとの借り待ちの上限。届かない DSN（pool 側の上限は 5 秒）でも 300 ms で Transient(Timeout) が返る。
+///
+///   pool の borrowTimeoutMs 5000  ×  呼び出しの上限 300  → 300 ms 前後で timeout
+@Test
+def testPoolWithConnectionTimeoutGivesUpEarly(): Unit \ {Assert, IO} =
+    let pool = Pool.open({ maxConnections = 2, borrowTimeoutMs = 5000 | Pool.defaultConfig({ url = "jdbc:postgresql://127.0.0.1:1/none", user = "none", password = "none" }) });
+    let started: Int64 = System.currentTimeMillis();
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() ->
+        Pool.withConnectionTimeout(pool, 300, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)));
+    let elapsed: Int64 = System.currentTimeMillis() - started;
+    Pool.close(pool);
+    Assert.assertEq(
+        expected = (Err(Failure.Transient(TransientKind.Timeout(300))), true),
+        (result, elapsed < 2000i64))
+
+/// 正常時は withConnection と同じに使える（上限には届かない）。
+@Test
+def testPoolWithConnectionTimeoutWorksWhenHealthy(): Unit \ {Assert, IO} =
+    let pool = smallPool(1000);
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() ->
+        Pool.withConnectionTimeout(pool, 2000, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)));
+    Pool.close(pool);
+    Assert.assertEq(expected = Ok(1), result)

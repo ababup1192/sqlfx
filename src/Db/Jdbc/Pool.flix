@@ -202,12 +202,70 @@ mod Pool {
     /// Tx が要るなら thunk の中で `Tx.withTx(conn, ...)`。制約違反の翻訳（`onConstraint`）は Tx の外で。
     ///
     pub def withConnection(pool: Pool, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
-        let conn = borrow(pool);
+        runOnConnection(borrow(pool), thunk)
+
+    ///
+    /// `withConnection` に、この呼び出しだけの借り待ちの上限を付けた形。上限までに借りられなければ
+    /// `TransientDbErr.timeout(borrowTimeoutMs)`。ping や health check のような「待ってまで欲しくない」
+    /// 借り方に使う。業務の Tx には使わない（そこで待ちが長いなら直すのは pool の設定の方なので）。
+    ///
+    pub def withConnectionTimeout(pool: Pool, borrowTimeoutMs: Int32, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+        match borrowWithin(pool, borrowTimeoutMs) {
+            case None                 => TransientDbErr.timeout(borrowTimeoutMs)
+            case Some(Err(transient)) => TransientDbErr.raiseTransient(transient)
+            case Some(Ok(conn))       => runOnConnection(conn, thunk)
+        }
+
+    ///
+    /// 借りた接続で thunk を走らせ、成功でも失敗でも必ず返す。
+    ///
+    def runOnConnection(conn: Connection, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
         let outcome = DbError.runWithKind(() -> Jdbc.runWithConnection(conn, () -> thunk(conn)));
         Jdbc.close(conn);
         match outcome {
             case Ok(value) => value
             case Err(kind) => DbError.raise(kind)
+        }
+
+    ///
+    /// borrow を別スレッドに出し、borrowTimeoutMs だけ待つ。間に合わなければ None。
+    ///
+    /// WhyNot: HikariCP の `connectionTimeout` を一時的に書き換えないのは、pool は共有なので他のリクエストの
+    /// 借り待ちまで一緒に縮むため。`HikariDataSource` には呼び出しごとの上限を渡す口が無い。
+    ///
+    /// WhyNot: Chan / NonDet を署名に出さないのは、この 2 つの実体が IO で、`/health` のような呼び出し側へ
+    /// 「中でチャネルを使っている」事情を伝播させたくないため。`unchecked_cast` はエフェクトを畳むだけで値は変えない。
+    ///
+    def borrowWithin(pool: Pool, borrowTimeoutMs: Int32): Option[Result[DbError.TransientKind, Connection]] \ IO =
+        unchecked_cast(borrowWithinChannel(pool, borrowTimeoutMs) as _ \ IO)
+
+    ///
+    /// borrowWithin の中身。
+    ///
+    /// WhyNot: spawn の region を `Static` にするのは、region は抜ける所で spawn したスレッドを待ち合わせるので、
+    /// その場で region を開くと待ち切る意味が無くなるため。
+    ///
+    /// WhyNot: 待ち切れなかった時に受け取りを諦めないのは、遅れて届いた接続が誰にも返されず pool が痩せるため。
+    /// 受け取り役をもう 1 本 spawn して、届いた所で閉じる。
+    ///
+    def borrowWithinChannel(pool: Pool, borrowTimeoutMs: Int32): Option[Result[DbError.TransientKind, Connection]] \ {IO, Chan, NonDet} =
+        let (sender, receiver) = Channel.buffered(1);
+        spawn Channel.send(TransientDbErr.runWithResult(() -> borrow(pool)), sender) @ Static;
+        select {
+            case delivered <- Channel.recv(receiver) => Some(delivered)
+            case _         <- Channel.recv(Channel.timeout(Int32.max(1, borrowTimeoutMs), Time.TimeUnit.Milliseconds)) => {
+                spawn closeWhenDelivered(receiver) @ Static;
+                None
+            }
+        }
+
+    ///
+    /// 待ち切れなかった借りが遅れて届いたら閉じる。
+    ///
+    def closeWhenDelivered(receiver: Receiver[Result[DbError.TransientKind, Connection]]): Unit \ {IO, Chan, NonDet} =
+        match Channel.recv(receiver) {
+            case Ok(conn) => Jdbc.close(conn)
+            case Err(_)   => ()
         }
 
     ///
