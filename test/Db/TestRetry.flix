@@ -1,3 +1,4 @@
+import java.lang.RuntimeException
 // Retry: Transient を捕まえて thunk を呼び直す（DB 無し）。
 
 /// 2 回 Transient で失敗して 3 回目で成功する thunk は、attempts = 3 なら成功する。
@@ -129,3 +130,79 @@ def testRetryWithJitterIsAppliedEachTime(): Unit \ Assert =
         Ref.get(log) |> List.reverse
     };
     Assert.assertEq(expected = List#{50, 100, 125}, waits)
+
+// ---- RetryExhausted の中身と、約束に反する投げ方 ----
+
+/// 失敗の種類が回ごとに変わっても、RetryExhausted が持つのは最後の失敗。回数は呼んだ回数。
+///
+///   attempt 1: deadlock
+///   attempt 2: timeout 7
+///   attempt 3: connectionLost "x"  → RetryExhausted(ConnectionLost "x", 3)
+@Test
+def testRetryExhaustedKeepsLastKind(): Unit \ Assert =
+    let result: Result[DbError.Failure, Unit] = region rc {
+        let counter = Ref.fresh(rc, 0);
+        let thunk = () -> {
+            Ref.put(Ref.get(counter) + 1, counter);
+            match Ref.get(counter) {
+                case 1 => TransientDbErr.deadlock()
+                case 2 => TransientDbErr.timeout(7)
+                case _ => TransientDbErr.connectionLost("x")
+            }
+        };
+        DbError.runWithFailure(() -> Retry.withRetry(3, thunk))
+    };
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbError.DbErrorKind.RetryExhausted(DbError.TransientKind.ConnectionLost("x"), 3))), result)
+
+/// 約束に反して TransientDbErr.raise に Transient でない kind を渡しても、再試行は回り、枯渇の最後の失敗は describe を持った ConnectionLost になる（落とさない）。
+///
+///   attempt 1〜2: TransientDbErr.raise(UniqueViolation "k") → RetryExhausted(ConnectionLost "uniqueViolation k", 2)、呼んだ回数 2
+@Test
+def testRetryTreatsNonTransientRaiseAsConnectionLost(): Unit \ Assert =
+    let (result, calls): (Result[DbError.Failure, Unit], Int32) = region rc {
+        let counter = Ref.fresh(rc, 0);
+        let thunk = () -> {
+            Ref.put(Ref.get(counter) + 1, counter);
+            TransientDbErr.raise(DbError.DbErrorKind.UniqueViolation("k"))
+        };
+        (DbError.runWithFailure(() -> Retry.withRetry(2, thunk)), Ref.get(counter))
+    };
+    Assert.assertEq(
+        expected = (Err(DbError.Failure.Permanent(DbError.DbErrorKind.RetryExhausted(DbError.TransientKind.ConnectionLost("uniqueViolation k"), 2))), 2),
+        (result, calls))
+
+/// JVM の例外は Db.guard で Other（DbErr）になるので再試行しない。呼んだ回数は 1。
+@Test
+def testRetryDoesNotRetryGuardedException(): Unit \ {Assert, IO} =
+    let (result, calls): (Result[DbError.Failure, Unit], Int32) = region rc {
+        let counter = Ref.fresh(rc, 0);
+        let thunk = () -> Db.guard(() -> {
+            Ref.put(Ref.get(counter) + 1, counter);
+            throw new RuntimeException("boom")
+        });
+        (DbError.runWithFailure(() -> Retry.withRetry(3, thunk)), Ref.get(counter))
+    };
+    Assert.assertEq(expected = (Err(DbError.Failure.Permanent(DbError.DbErrorKind.Other("boom"))), 1), (result, calls))
+
+/// 成功した回の後は wait も jitter も呼ばれない（成功の後に余計に待たない）。
+///
+///   attempt 1: deadlock → jitter 1 回・wait 1 回
+///   attempt 2: Ok       → 呼ばれない
+@Test
+def testRetryDoesNotWaitAfterSuccess(): Unit \ Assert =
+    let (waits, jitters): (Int32, Int32) = region rc {
+        let counter = Ref.fresh(rc, 0);
+        let waitCount = Ref.fresh(rc, 0);
+        let jitterCount = Ref.fresh(rc, 0);
+        let thunk = () -> {
+            Ref.put(Ref.get(counter) + 1, counter);
+            if (Ref.get(counter) < 2) TransientDbErr.deadlock() else ()
+        };
+        discard DbError.runWithFailure(() -> Retry.withRetryWith(
+            Retry.defaultPolicy(),
+            _ -> Ref.put(Ref.get(waitCount) + 1, waitCount),
+            () -> { Ref.put(Ref.get(jitterCount) + 1, jitterCount); 0.0 },
+            thunk));
+        (Ref.get(waitCount), Ref.get(jitterCount))
+    };
+    Assert.assertEq(expected = (1, 1), (waits, jitters))

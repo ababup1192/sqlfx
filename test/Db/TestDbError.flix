@@ -1,3 +1,7 @@
+import java.lang.AssertionError
+import java.lang.InternalError
+import java.lang.Throwable
+import java.lang.VerifyError
 import java.lang.OutOfMemoryError
 import java.lang.RuntimeException
 import java.lang.StackOverflowError
@@ -157,3 +161,133 @@ def testGuardRethrowsFatal(): Unit \ {Assert, IO} =
             case _: OutOfMemoryError => true
         });
     Assert.assertEq(expected = Ok(true), escaped)
+
+// ---- Db.guard の境界 ----
+
+/// 利用側が guard の外で張った、再開する effect（テスト用）。
+eff Counter {
+    def next(): Int32
+}
+
+/// 例外を投げないが、Error の子ではある物（テスト用の判定表に使う）。
+def fatalOf(error: Throwable): Bool \ IO = Db.isFatal(error)
+
+/// isFatal は VirtualMachineError の子だけ true。StackOverflowError は VirtualMachineError の子でも false。
+/// Error の子でも VirtualMachineError でない物（AssertionError / VerifyError）は false。
+///
+///   OutOfMemoryError    → true
+///   InternalError       → true
+///   StackOverflowError  → false
+///   AssertionError      → false
+///   VerifyError         → false
+///   RuntimeException    → false
+@Test
+def testIsFatalTable(): Unit \ {Assert, IO} =
+    let errors: List[Throwable] = List#{
+        unchecked_cast(new OutOfMemoryError("oom") as Throwable),
+        unchecked_cast(new InternalError("internal") as Throwable),
+        unchecked_cast(new StackOverflowError("deep") as Throwable),
+        unchecked_cast(new AssertionError("assert") as Throwable),
+        unchecked_cast(new VerifyError("verify") as Throwable),
+        unchecked_cast(new RuntimeException("boom") as Throwable)
+    };
+    Assert.assertEq(expected = List#{true, true, false, false, false, false}, errors |> List.map(fatalOf))
+
+/// guard の中で呼んだ op は外の handler で再開でき、再開した後の値もそのまま返る。
+///
+///   handler: next → 1, 2, 3 …   guard(() -> next() + next()) → 3
+@Test
+def testGuardLetsResumableEffectThrough(): Unit \ {Assert, IO} =
+    let total: Result[DbError.Failure, Int32] = region rc {
+        let counter = Ref.fresh(rc, 0);
+        run {
+            Db.attempt(() -> Db.guard(() -> Counter.next() + Counter.next()))
+        } with handler Counter {
+            def next(resume) = { Ref.put(Ref.get(counter) + 1, counter); resume(Ref.get(counter)) }
+        }
+    };
+    Assert.assertEq(expected = Ok(3), total)
+
+/// 再開した後に投げた例外も、guard が handler の内側にあれば Other になる。
+///
+///   [handler Counter [guard: next(); throw]] → Other("after resume")
+@Test
+def testGuardCatchesExceptionAfterResume(): Unit \ {Assert, IO} =
+    let outcome: Result[DbError.Failure, Int32] =
+        run {
+            Db.attempt(() -> Db.guard(() -> { discard Counter.next(); throw new RuntimeException("after resume") }))
+        } with handler Counter {
+            def next(resume) = resume(1)
+        };
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbErrorKind.Other("after resume"))), outcome)
+
+/// 例外が guard を素通りするか（テスト用）。素通りすればテストの try に届く。
+///
+///   "ok"      … 例外は出なかった
+///   "other"   … guard が Other にした
+///   "escaped" … guard を素通りした
+def observeGuard(thunk: Unit -> Int32 \ IO): String \ IO =
+    try {
+        match Db.attempt(() -> Db.guard(thunk)) {
+            case Ok(_)                                                   => "ok"
+            case Err(DbError.Failure.Permanent(DbErrorKind.Other(_)))    => "other"
+            case Err(_)                                                  => bug!("guard は Other しか作らない")
+        }
+    } catch {
+        case _: RuntimeException => "escaped"
+    }
+
+/// 再開する effect の op を挟む。
+def bumpAndThrow(): Int32 \ {Counter, IO} =
+    discard Counter.next();
+    throw new RuntimeException("escapes")
+
+/// 利用側の handler が guard の内側にある時、例外がどこで投げられると guard に届くか。
+///
+///   a. handler の中で op を再開した後に thunk が投げる           → other
+///   b. op を呼ばずに thunk が投げる                              → other
+///   c. handler の腕が再開せずに投げる                             → other
+///   d. handler の腕が再開した後に投げる                           → other
+///   e. handler が 2 重で、内側の op を再開した後に thunk が投げる → other
+///
+/// WhyNot: README §6 の「handler の内側の例外は catch を素通りする」を全部の形で期待にしないのは、
+/// 実測すると再開する handler だけの形では guard に届くため。素通りが起きる形は実 PG の
+/// `testPoolLazyTxHandlerInsideWithoutGuard` で見る。
+@Test
+def testGuardOutsideHandlerTable(): Unit \ {Assert, IO} =
+    let shapes: List[Unit -> Int32 \ IO] = List#{
+        () -> run bumpAndThrow() with handler Counter { def next(resume) = resume(1) },
+        () -> run { throw new RuntimeException("escapes") } with handler Counter { def next(resume) = resume(1) },
+        () -> run Counter.next() with handler Counter { def next(_resume) = throw new RuntimeException("escapes") },
+        () -> run Counter.next() with handler Counter { def next(resume) = { discard resume(1); throw new RuntimeException("escapes") } },
+        () -> run {
+            run bumpAndThrow() with handler Counter { def next(resume) = resume(1) }
+        } with handler Counter { def next(resume) = resume(2) }
+    };
+    Assert.assertEq(expected = List#{"other", "other", "other", "other", "other"}, shapes |> List.map(observeGuard))
+
+/// DbErr / TransientDbErr は guard を素通りする（Other に包み直さない）。
+@Test
+def testGuardKeepsDbEffectsAsIs(): Unit \ {Assert, IO} =
+    let thunks: List[Unit -> Int32 \ {DbErr, TransientDbErr}] = List#{
+        () -> DbErr.uniqueViolation("users_email_key"),
+        () -> TransientDbErr.deadlock()
+    };
+    Assert.assertEq(
+        expected = List#{
+            Err(DbError.Failure.Permanent(DbErrorKind.UniqueViolation("users_email_key"))),
+            Err(DbError.Failure.Transient(TransientKind.Deadlock))
+        },
+        thunks |> List.map(thunk -> Db.attempt(() -> Db.guard(thunk))))
+
+/// guard を 2 重に置いても Other は 1 回だけ（内側が DbErr にした物を外側は例外として見ない）。
+@Test
+def testGuardNestedTurnsIntoOtherOnce(): Unit \ {Assert, IO} =
+    let outcome: Result[DbError.Failure, Int32] = Db.attempt(() -> Db.guard(() -> Db.guard(() -> throw new RuntimeException("boom"))));
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbErrorKind.Other("boom"))), outcome)
+
+/// Error の子でも VirtualMachineError でない物（AssertionError）は Other になる。
+@Test
+def testGuardTurnsNonFatalErrorIntoOther(): Unit \ {Assert, IO} =
+    let outcome: Result[DbError.Failure, Int32] = Db.attempt(() -> Db.guard(() -> throw new AssertionError("assert")));
+    Assert.assertEq(expected = Err(DbError.Failure.Permanent(DbErrorKind.Other("assert"))), outcome)
