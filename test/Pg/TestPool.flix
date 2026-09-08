@@ -107,3 +107,12 @@ def testPoolStatsFollowBorrowAndReturn(): Unit \ {Assert, IO} =
     let after = Pool.stats(pool);
     Pool.close(pool);
     Assert.assertEq(expected = (Ok((1, 1, 1)), 0, 1), (inside, after#active, after#idle))
+
+/// DB に届かない DSN の pool から借りると、pool は空いているので TransientDbErr.connectionLost（timeout ではない）。
+@Test
+def testPoolUnreachableIsConnectionLost(): Unit \ {Assert, IO} =
+    let pool = Pool.open({ maxConnections = 2, borrowTimeoutMs = 250 | Pool.defaultConfig({ url = "jdbc:postgresql://127.0.0.1:1/none", user = "none", password = "none" }) });
+    let result = RawSql.runWithAllow(() -> DbError.runWithFailure(() -> Pool.withConnection(pool, _ -> Sql.fetch("SELECT 1", Nil) |> List.length)))
+        |> Result.mapErr(failure -> String.startsWith(prefix = "Transient(connectionLost", "${failure}"));
+    Pool.close(pool);
+    Assert.assertEq(expected = Err(true), result)

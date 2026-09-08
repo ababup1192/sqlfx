@@ -412,6 +412,15 @@ DbErr            uniqueViolation / foreignKeyViolation /      直らない
 
 制約違反は制約名付き（`notNullViolation` だけ列名）。制約名は pgjdbc の `ServerErrorMessage` から取るので、PG のロケールに依存しない。
 
+`Pool.borrow`（接続を借りる段）の `TransientDbErr` は 2 つの意味に分かれる。
+
+- `timeout` … **プールの借り待ちの上限**。満杯（`active >= max`）で `borrowTimeoutMs` 待っても空かなかった。DB は生きている見込みで、遅い SQL か接続の漏れを疑う
+- `connectionLost` … **DB に届かない**。プールは空いているのに接続が作れなかった。DSN・ネットワーク・DB の停止を疑う
+
+HikariCP はどちらでも同じ "request timed out" の文言を出すので、失敗した時点の `Pool.stats` と cause の連鎖で分ける
+（`java.net.ConnectException` / `java.net.SocketTimeoutException` / SQLState が `08` で始まる `PSQLException` があれば stats に関係なく `connectionLost`）。
+判定は純粋な `Pool.borrowFailureKind(message, causes, sqlState, stats)`。
+
 ### 入力の制約は DDL に書く
 
 長さや文字種のような入力の制約は、DB の `CHECK` に書く。全経路（バッチ、手作業、別のアプリ）を守れるのは DB の制約だけで、
@@ -506,7 +515,8 @@ Retry.withRetry(3, () ->                            // Transient なら thunk �
 `Pool.withLazyTxAfterBegin(pool, onBegin, thunk)` は BEGIN の直後に onBegin を同じ Tx で 1 回流す。`SELECT set_config('app.project_id', $1, true)` のように RLS の印を置くのに使う。
 GraphQL のリゾルバのように、DB を使うかどうかが呼ぶまで分からない単位を 1 つの Tx にしたい所で使う。
 
-`Pool` は HikariCP を包んだ物。接続数の上限を超えた借り出しは `borrowTimeoutMs` 待って `TransientDbErr.timeout` になる。
+`Pool` は HikariCP を包んだ物。接続数の上限を超えた借り出しは `borrowTimeoutMs` 待って `TransientDbErr.timeout`（借り待ちの上限）、
+DB に届かなければ `TransientDbErr.connectionLost` になる（分け方は「6. エラーの扱い」）。
 CLI やテストのように 1 回だけ開くなら `Jdbc.withConnection(config, conn -> ...)`（毎回接続する）。
 `withRetry` を `withConnection` の外に置くのは、`connectionLost` した接続で再試行しても無駄だから。
 

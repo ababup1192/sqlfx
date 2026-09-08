@@ -4,6 +4,7 @@
 ///
 mod Pool {
 
+    import java.lang.Throwable
     import java.sql.Connection
     import java.sql.SQLException
     import com.zaxxer.hikari.HikariConfig
@@ -113,6 +114,9 @@ mod Pool {
     /// 接続を借りる。上限まで使われていて `borrowTimeoutMs` 待っても空かなければ TransientDbErr.timeout、
     /// DB に繋げなければ TransientDbErr.connectionLost。
     ///
+    /// WhyNot: 例外の message で分けないのは、HikariCP が「借り待ちの上限」も「DB に届かない」も
+    /// 同じ "request timed out" の文言で出すため。借りに失敗した時点の `stats` と cause の連鎖で分ける。
+    ///
     pub def borrow(pool: Pool): Connection \ {IO, TransientDbErr} =
         let Pool.Pool(source) = pool;
         try {
@@ -121,10 +125,78 @@ mod Pool {
             case e: SQLException =>
                 let msg: String = e.getMessage();
                 let text = if (Object.isNull(msg)) "" else msg;
-                if (String.contains(substr = "request timed out", text))
-                    TransientDbErr.timeout(0)
-                else
-                    TransientDbErr.connectionLost(text)
+                let causes = causeClassNames(unchecked_cast(e as Throwable), maxCauseDepth());
+                match borrowFailureKind(text, causes, sqlStateOf(e), stats(pool)) {
+                    case DbError.DbErrorKind.Timeout(ms)     => TransientDbErr.timeout(ms)
+                    case DbError.DbErrorKind.ConnectionLost(m) => TransientDbErr.connectionLost(m)
+                    case kind                                => TransientDbErr.connectionLost("${kind}")
+                }
+        }
+
+    ///
+    /// borrow が失敗した理由を分ける（純粋）。
+    ///
+    /// - cause の連鎖に接続の失敗（ConnectException / SocketTimeoutException / SQLState が "08" の PSQLException）があれば connectionLost
+    /// - そうでなく pool が満杯（`active >= max`）なら timeout（借り待ちの上限）
+    /// - それ以外は、pool は空いているのに接続が作れなかったので connectionLost
+    ///
+    pub def borrowFailureKind(message: String, causes: List[String], sqlState: Option[String], poolStats: PoolStats): DbError.DbErrorKind =
+        if (isConnectionFailure(causes, sqlState))
+            DbError.DbErrorKind.ConnectionLost(message)
+        else if (poolStats#max > 0 and poolStats#active >= poolStats#max)
+            DbError.DbErrorKind.Timeout(0)
+        else
+            DbError.DbErrorKind.ConnectionLost(message)
+
+    ///
+    /// cause の連鎖が「DB に届かなかった」事を示すか。
+    ///
+    def isConnectionFailure(causes: List[String], sqlState: Option[String]): Bool =
+        let hasClass = name -> List.memberOf(name, causes);
+        let psqlIsConnectionClass =
+            hasClass("org.postgresql.util.PSQLException")
+                and sqlState |> Option.exists(state -> String.startsWith(prefix = "08", state));
+        hasClass("java.net.ConnectException")
+            or hasClass("java.net.SocketTimeoutException")
+            or psqlIsConnectionClass
+
+    ///
+    /// cause の連鎖をたどる上限。
+    ///
+    def maxCauseDepth(): Int32 = 8
+
+    ///
+    /// 例外とその cause の連鎖の class 名。
+    ///
+    def causeClassNames(t: Throwable, depth: Int32): List[String] \ IO =
+        if (depth <= 0 or Object.isNull(t))
+            Nil
+        else {
+            let name: String = t.getClass().getName();
+            name :: causeClassNames(t.getCause(), depth - 1)
+        }
+
+    ///
+    /// 連鎖の中の pgjdbc の例外の SQLState。無ければ SQLException 自身の物。
+    ///
+    def sqlStateOf(e: SQLException): Option[String] \ IO =
+        let state: String = e.getSQLState();
+        if (Object.isNull(state)) psqlSqlState(e.getCause(), maxCauseDepth()) else Some(state)
+
+    ///
+    /// 連鎖をたどって最初の PSQLException の SQLState を取る。
+    ///
+    def psqlSqlState(t: Throwable, depth: Int32): Option[String] \ IO =
+        if (depth <= 0 or Object.isNull(t))
+            None
+        else {
+            let name: String = t.getClass().getName();
+            if (name == "org.postgresql.util.PSQLException") {
+                let psql: SQLException = unchecked_cast(t as SQLException);
+                let state: String = psql.getSQLState();
+                if (Object.isNull(state)) psqlSqlState(t.getCause(), depth - 1) else Some(state)
+            } else
+                psqlSqlState(t.getCause(), depth - 1)
         }
 
     ///
