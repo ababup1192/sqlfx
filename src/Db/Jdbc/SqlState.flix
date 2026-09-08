@@ -8,6 +8,10 @@ mod SqlState {
     ///
     /// sqlstate の一覧: https://www.postgresql.org/docs/current/errcodes-appendix.html
     ///
+    /// WhyNot: 55P03（lock_timeout）を Timeout、57P01（admin_shutdown。DB の再起動や pg_terminate_backend）を
+    /// ConnectionLost に入れるのは、どちらも class では 08 / 57014 と別だが、再試行で通る物であり、
+    /// 特に 57P01 は再起動の最初の 1 本目に出るので Transient でないと withRetry が再起動を跨げないため。
+    ///
     pub def classify(error: { sqlState = String, message = String }): DbErrorKind =
         classifyWith({ sqlState = error#sqlState, message = error#message, constraint = None, column = None })
 
@@ -32,9 +36,9 @@ mod SqlState {
             DbErrorKind.NotNullViolation(Option.getWithDefault(columnName(message), error#column))
         else if (sqlState == "40001" or sqlState == "40P01")
             DbErrorKind.Transient(TransientKind.Deadlock)
-        else if (sqlState == "57014")
+        else if (sqlState == "57014" or sqlState == "55P03")
             DbErrorKind.Transient(TransientKind.Timeout(0))
-        else if (String.startsWith(prefix = "08", sqlState))
+        else if (String.startsWith(prefix = "08", sqlState) or sqlState == "57P01")
             DbErrorKind.Transient(TransientKind.ConnectionLost(message))
         else if (sqlState == "42P01" or sqlState == "42703" or sqlState == "42883" or sqlState == "42804")
             DbErrorKind.SchemaMismatch(message)

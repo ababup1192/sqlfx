@@ -13,17 +13,30 @@ def testClassifyDomain(): Unit \ Assert =
             SqlState.classify({ sqlState = "23503", message = "insert or update on table \"posts\" violates foreign key constraint \"posts_user_id_fkey\"" })
         ))
 
-/// デッドロック・直列化失敗・statement_timeout・接続断は Transient。
+/// デッドロック・直列化失敗・statement_timeout・lock_timeout・接続断・admin_shutdown（DB の再起動）は Transient。
+///
+///   40P01 → deadlock          40001 → deadlock
+///   57014 → timeout 0         55P03 → timeout 0
+///   08006 → connectionLost    57P01 → connectionLost
 @Test
 def testClassifyTransient(): Unit \ Assert =
     Assert.assertEq(
-        expected = (DbErrorKind.Transient(TransientKind.Deadlock), DbErrorKind.Transient(TransientKind.Deadlock), DbErrorKind.Transient(TransientKind.Timeout(0)), DbErrorKind.Transient(TransientKind.ConnectionLost("terminating connection"))),
-        (
+        expected = List#{
+            DbErrorKind.Transient(TransientKind.Deadlock),
+            DbErrorKind.Transient(TransientKind.Deadlock),
+            DbErrorKind.Transient(TransientKind.Timeout(0)),
+            DbErrorKind.Transient(TransientKind.Timeout(0)),
+            DbErrorKind.Transient(TransientKind.ConnectionLost("terminating connection")),
+            DbErrorKind.Transient(TransientKind.ConnectionLost("terminating connection due to administrator command"))
+        },
+        List#{
             SqlState.classify({ sqlState = "40P01", message = "deadlock detected" }),
             SqlState.classify({ sqlState = "40001", message = "could not serialize access" }),
             SqlState.classify({ sqlState = "57014", message = "canceling statement due to statement timeout" }),
-            SqlState.classify({ sqlState = "08006", message = "terminating connection" })
-        ))
+            SqlState.classify({ sqlState = "55P03", message = "canceling statement due to lock timeout" }),
+            SqlState.classify({ sqlState = "08006", message = "terminating connection" }),
+            SqlState.classify({ sqlState = "57P01", message = "terminating connection due to administrator command" })
+        })
 
 /// テーブルや列が無い・型が合わないは SchemaMismatch。知らない sqlstate は Corrupt にコードごと残す。
 @Test
