@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.3.0"
+"github:ababup1192/sqlfx" = "0.3.1"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
