@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.4.0"
+"github:ababup1192/sqlfx" = "0.4.1"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -454,6 +454,12 @@ match failure {
 3. **失敗を捨てられる場所が handler だけになる。** 「握り潰し」は `run … with handler` を書いた所にしか無いので、
    grep で数えられる。`Result` だと `Result.getWithDefault` があちこちに散る
 
+狙いを 1 行で言うと「**明示的に handle しなければ、失敗が関数の型に現れる事を強制する**」。Java のチェック例外と同じ狙いで、
+`throws` の代わりに `\ DbErr` が署名に出る。`Result` でも同じ事はできるが、書いていて落ちやすい形が 2 つある。
+`List.map(row -> insert(row))` と `Result.traverse(insert, rows)` の取り違え（前者は `List[Result[…]]` で 1 つの失敗が中に埋まり、
+呼ぶ側が全部見ないと気付かない）と、`Result.toOption` で「無い」と「失敗した」が同じ `None` に潰れる事。
+エフェクトなら前者は `List.map` のまま最初の失敗で止まり、後者は `Option` に落とす道が無い。
+
 値で受けたい所（バッチで 1 行ごとの結果を集める、失敗を数える）は `Db.attempt` の 1 本だけを通す。
 
 ```flix
@@ -486,8 +492,31 @@ DbError.runWithFailure(() ->
 | `def f(thunk: Unit -> a \ ef): a \ ef + DbErr` の `ef` に `DbErr` が来る | E6217。エフェクトが型変数の関数で同じエフェクトを declared にはできない |
 | resume しない handler で握り潰す | できるが、`Void` の op は resume できないので、その op の後ろは走らない |
 
-JVM の例外は型に出ない。`Pool.withLazyTx` は thunk の最内側で catch して `DbErr` の `Other` に変えるので、
-利用側で包み直す必要は無い（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出する）。
+JVM の例外は型に出ない。`Pool.withLazyTx` は自分の handler の最内側で catch して `DbErr` の `Other` に変える
+（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出する）。**ただし、その catch は利用側が thunk の中で
+張った handler の内側には届かない**。上の表の 1 行目と同じ事が、ライブラリと利用側の境で起きる。
+
+```
+   Pool.withLazyTx(pool, thunk)
+     └─ run … with handler SqlRead / SqlWrite      ← ライブラリの handler
+          └─ catch（Db.guard）                     ← ここまでは拾える
+               └─ BizErr.runWithResult(…)          ← 利用側の handler
+                    └─ Session.runWith(…)
+                         └─ throw RuntimeException  ← ライブラリの catch を素通り。COMMIT / ROLLBACK と接続の返却が飛ぶ
+```
+
+thunk の中で自分の handler を張るなら、**一番内側の handler の直下に `Db.guard` を置く**。中身はライブラリの catch と同じ判断
+（fatal は再送出、それ以外は `DbErr.other`。message が無ければ class 名）で、`DbErr` になった例外は普通の失敗として ROLLBACK に乗る。
+
+```flix
+Pool.withLazyTxResult(pool, () ->
+    BizErr.runWithResult(() ->
+        Session.runWith(actor, () ->
+            Db.guard(() -> work()))))        // 例外を投げうる物の直近の handler の内側
+```
+
+handler を張るたびに置くのではなく、一番内側の 1 か所で良い（外側の handler で飛ぶ物は、その handler の中で起きた事なので
+ライブラリの catch が拾う）。テストの形は `test/Pg/TestPool.flix` の `testPoolLazyTxGuardInsideUserHandler`。
 
 `Pool.borrow`（接続を借りる段）の `TransientDbErr` は 2 つの意味に分かれる。
 
@@ -513,6 +542,13 @@ HikariCP はどちらでも同じ "request timed out" の文言を出すので�
 | `Pool.borrowFailureKind` が返す `DbErrorKind` | `TransientKind` |
 | 業務エラーで巻き戻す自前の sentinel + `Ref` | `Pool.withLazyTxResult` |
 | `withLazyTx` の thunk を自分で try/catch で包む | 不要（ライブラリが最内側で受ける） |
+
+### 0.4.0 からの移行
+
+| 0.4.0 | 0.4.1 |
+|---|---|
+| `DbErr.runWithResult` が返す `Result[String, _]` | `Result[DbErrorKind, _]`（文言は `DbError.describe(kind)`） |
+| thunk の中で handler を張った内側の try/catch を自前で書く | `Db.guard(thunk)`（上の「触ってはいけない形」） |
 
 ### 入力の制約は DDL に書く
 
@@ -606,6 +642,7 @@ Retry.withRetry(3, () ->                            // Transient なら thunk �
 
 `Pool.withLazyTx(pool, thunk)` は「最初の SQL が来た時に借りて BEGIN、終わったら COMMIT / ROLLBACK」。SQL を出さない thunk はプールに触らない。
 thunk が JVM の例外を投げても ROLLBACK して接続を返す（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出）。
+thunk の中で自分の handler を張るなら、その一番内側に `Db.guard` を置く（「6. エラーの扱い」の「触ってはいけない形」）。
 Tx の中で業務エラーを受けて巻き戻したいなら `Pool.withLazyTxResult`（「6. エラーの扱い」）。
 `Pool.withLazyTxAfterBegin(pool, onBegin, thunk)` は BEGIN の直後に onBegin を同じ Tx で 1 回流す。`SELECT set_config('app.project_id', $1, true)` のように RLS の印を置くのに使う。
 GraphQL のリゾルバのように、DB を使うかどうかが呼ぶまで分からない単位を 1 つの Tx にしたい所で使う。
