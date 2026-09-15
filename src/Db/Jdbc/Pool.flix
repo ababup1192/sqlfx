@@ -199,7 +199,7 @@ mod Pool {
     /// 接続を借りて thunk を走らせ、成功でも失敗でも必ず返す。失敗はそのまま再送出する。
     /// Tx が要るなら thunk の中で `Tx.withTx(conn, ...)`。制約違反の翻訳（`onConstraint`）は Tx の外で。
     ///
-    pub def withConnection(pool: Pool, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withConnection(pool: Pool, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         runOnConnection(borrow(pool), thunk)
 
     ///
@@ -207,7 +207,7 @@ mod Pool {
     /// `TransientDbErr.timeout(borrowTimeoutMs)`。ping や health check のような「待ってまで欲しくない」
     /// 借り方に使う。業務の Tx には使わない（そこで待ちが長いなら直すのは pool の設定の方なので）。
     ///
-    pub def withConnectionTimeout(pool: Pool, borrowTimeoutMs: Int32, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withConnectionTimeout(pool: Pool, borrowTimeoutMs: Int32, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         match borrowWithin(pool, borrowTimeoutMs) {
             case None                 => TransientDbErr.timeout(borrowTimeoutMs)
             case Some(Err(transient)) => TransientDbErr.raiseTransient(transient)
@@ -217,7 +217,7 @@ mod Pool {
     ///
     /// 借りた接続で thunk を走らせ、成功でも失敗でも必ず返す。
     ///
-    def runOnConnection(conn: Connection, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    def runOnConnection(conn: Connection, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         let outcome = DbError.runWithKind(() -> Jdbc.runWithConnection(conn, () -> thunk(conn)));
         Jdbc.close(conn);
         match outcome {
@@ -273,7 +273,7 @@ mod Pool {
     /// thunk が JVM の例外を投げても ROLLBACK して接続を返し、`DbErr` の `Other` として上げる
     /// （`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出）。
     ///
-    pub def withLazyTx(pool: Pool, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withLazyTx(pool: Pool, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         withLazyTxAfterBegin(pool, () -> (), thunk)
 
     ///
@@ -284,7 +284,7 @@ mod Pool {
     /// WhyNot: 印を Tx の外（接続を借りた直後）で置かないのは、`set_config(..., true)` は Tx の終わりで消えるので
     /// BEGIN の後でないと効かず、プールに返した接続へ印が残る事も無いため。
     ///
-    pub def withLazyTxAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + (ef2 - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withLazyTxAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + (ef2 - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         match withLazyTxResultAfterBegin(pool, onBegin, () -> Ok(thunk())) {
             case Ok(value) => value
             // WhyNot: この腕を書くのは、e が型変数のままで match が網羅を求めるため。Err は上の `Ok(...)` からは作られない
@@ -302,13 +302,13 @@ mod Pool {
     /// WhyNot: 業務エラーを Tx の外で受けないのは、Flix の effect は再開しない時に間の frame を捨てるだけで
     /// finally が無く、外で受けると COMMIT / ROLLBACK と接続の返却が飛んで接続が漏れるため。
     ///
-    pub def withLazyTxResult(pool: Pool, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withLazyTxResult(pool: Pool, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         withLazyTxResultAfterBegin(pool, () -> (), thunk)
 
     ///
     /// `withLazyTxResult` に加えて、BEGIN の直後に onBegin を同じ Tx で 1 回だけ流す（`withLazyTxAfterBegin` と同じ）。
     ///
-    pub def withLazyTxResultAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite}) + (ef2 - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withLazyTxResultAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + (ef2 - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         region rc {
             let slot = Ref.fresh(rc, None);
             def open() = match Ref.get(slot) {
@@ -333,6 +333,8 @@ mod Pool {
                 } with handler SqlWrite {
                     def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(open(), sql, params)))
                     def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
+                } with handler SqlSavepoint {
+                    def control(command, resume)              = resume(DbError.runWithKind(() -> Jdbc.controlSavepoint(open(), command)))
                 });
             let finished = match (Ref.get(slot), outcome) {
                 case (None, _)                => outcome
@@ -353,12 +355,14 @@ mod Pool {
     ///
     /// 決まった接続で thunk の SQL を流す（Tx の管理はしない）。
     ///
-    def runOn(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    def runOn(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         run thunk() with handler SqlRead {
             def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn, sql, params)))
         } with handler SqlWrite {
             def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(conn, sql, params)))
             def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn, sql, params)))
+        } with handler SqlSavepoint {
+            def control(command, resume)              = resume(DbError.runWithKind(() -> Jdbc.controlSavepoint(conn, command)))
         }
 
 }

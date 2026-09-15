@@ -53,10 +53,10 @@ mod Jdbc {
         }
 
     ///
-    /// 1 本の接続で fetch / execute を実行する。結果は即時 materialize する。
-    /// 失敗は値（DbErrorKind）で継続に渡し、呼び出し側の `Sql.*` が op にする。継続は必ず 1 回呼ぶ。
+    /// 1 本の接続で fetch / execute / SAVEPOINT の命令を実行する。結果は即時 materialize する。
+    /// 失敗は値（DbErrorKind）で継続に渡し、呼び出し側の `Sql.*` / `Tx.withSavepoint` が op にする。継続は必ず 1 回呼ぶ。
     ///
-    pub def runWithConnection(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + IO =
+    pub def runWithConnection(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + IO =
         run {
             thunk()
         } with handler SqlRead {
@@ -64,13 +64,15 @@ mod Jdbc {
         } with handler SqlWrite {
             def execute(sql, params, resume) = resume(DbError.runWithKind(() -> executeStatement(conn, sql, params)))
             def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> fetchRows(conn, sql, params)))
+        } with handler SqlSavepoint {
+            def control(command, resume) = resume(DbError.runWithKind(() -> controlSavepoint(conn, command)))
         }
 
     ///
     /// 接続を開いて thunk を走らせ、成功でも失敗でも必ず閉じる。失敗はそのまま再送出する。
     /// 「開く → runWithConnection → 閉じる」を毎回書かないための入口。Tx が要るなら thunk の中で `Tx.withTx` を呼ぶ。
     ///
-    pub def withConnection(config: ConnectionConfig, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withConnection(config: ConnectionConfig, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         let conn = connect(config);
         let outcome = DbError.runWithKind(() -> runWithConnection(conn, () -> thunk(conn)));
         close(conn);
@@ -110,6 +112,12 @@ mod Jdbc {
         } catch {
             case e: SQLException => { closeQuietly(statement); raiseSqlException(e) }
         }
+
+    ///
+    /// SAVEPOINT / RELEASE / ROLLBACK TO を 1 つ発行する。名前は `Savepoint.isValidName` を通った物だけが来る。
+    ///
+    pub def controlSavepoint(conn: Connection, command: Savepoint.Command): Unit \ {IO, TransientDbErr, DbErr} =
+        discard executeStatement(conn, Savepoint.toSql(command), Nil)
 
     ///
     /// PreparedStatement を作る。ここで失敗したら閉じる物は無い。

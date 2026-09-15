@@ -486,6 +486,34 @@ DbError.runWithFailure(() ->
 業務エラーを Tx の **外** で受けてはいけない。Flix のエフェクトは再開しない時に間の frame を捨てるだけで `finally` が無く、
 外で受けると `withLazyTx` の COMMIT / ROLLBACK と接続の返却が飛んで、接続が「idle in transaction」のまま漏れる。
 
+### Tx の一部分だけを巻き戻す（`Tx.withSavepoint`）
+
+`Tx.withSavepoint(name, thunk)` は thunk を `SAVEPOINT name` で囲む。thunk が `TransientDbErr` / `DbErr` を投げたら
+`ROLLBACK TO SAVEPOINT name` で戻して `Err`、成功なら `RELEASE SAVEPOINT name` で `Ok`（戻りは `Db.attempt` と同じ `Result[Failure, a]`）。
+中の失敗（`statement_timeout`、制約違反、aborted）は外の Tx に及ばず、中で置いた `SET LOCAL` / `set_config(..., true)` も SAVEPOINT の前の値に戻る。
+読むだけ（`DbRead`）の Tx でも張れる（`SqlSavepoint` が付くだけで `SqlWrite` は要らない）。
+
+```flix
+// 5 秒で切る集計を、その集計だけの失敗に閉じ込める。切られても外の Tx は続きを出して COMMIT できる
+def countEntries(scope: ProjectId): Result[Failure, Int64] \ DbRead + SqlSavepoint + RawSql =
+    Tx.withSavepoint("agg", () -> {
+        discard Sql.fetch("SELECT set_config('statement_timeout', '5000', true)", Nil);
+        Sql.fetchOneAs(Decoder.int64("n"), "SELECT count(*) AS n FROM entries WHERE project_id = $1", List#{SqlValue.Str(scope)})
+            |> Option.getWithDefault(0i64)
+    })
+```
+
+- `name` は `^[a-z_][a-z0-9_]*$` で 63 文字まで。それ以外は SQL を出さずに `Err(Permanent(Other("invalid savepoint name: ...")))`。SQL の文面に入る値はこれだけ
+- **thunk の中で非再開の effect（`CmsErr` のような業務エラー）を外へ投げてはいけない。** Flix の effect は再開しない時に間の frame を捨てるだけで、
+  `RELEASE` / `ROLLBACK TO` の後始末が飛び、SAVEPOINT が張られたまま外の Tx が続く。thunk の中で受けて **`DbErr` か戻り値** にする
+  （`Tx.withSavepoint("s", () -> BizErr.runWithResult(work))` のように、thunk の戻り値を `Result` にする）
+- `RELEASE` / `ROLLBACK TO` 自体の失敗（接続が切れた等）は値にせず、外の Tx の失敗として投げる。外の Tx はいつも通り ROLLBACK になる
+- `Db.attempt` を Tx の中で使う形（上）と違い、失敗の後も Tx は aborted にならないので、そのまま値を返して COMMIT できる
+- 入れ子にできる。内側の失敗は内側の SAVEPOINT まで、外側の失敗は RELEASE 済みの内側の書き込みごと戻す
+- DB 無しのテストでは `DbTest.runRecording` が `SAVEPOINT s` / `RELEASE SAVEPOINT s` / `ROLLBACK TO SAVEPOINT s` を文として記録し、
+  `runWithRows` / `runWithTable` は命令を全部通す。自分で `SqlRead` の handler を書いている所は `SqlSavepoint` の handler も並べる
+  （op は `control(command): Result[DbErrorKind, Unit]` の 1 つ。`Savepoint.toSql(command)` が文にする）
+
 ### 触ってはいけない形（実測）
 
 | 形 | 何が起きるか |
@@ -655,6 +683,7 @@ Retry.withRetry(3, () ->                            // Transient なら thunk �
 thunk が JVM の例外を投げても ROLLBACK して接続を返す（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出）。
 thunk の中で自分の handler を張るなら、その一番内側に `Db.guard` を置く（「6. エラーの扱い」の「触ってはいけない形」）。
 Tx の中で業務エラーを受けて巻き戻したいなら `Pool.withLazyTxResult`（「6. エラーの扱い」）。
+Tx の一部分だけを巻き戻したいなら `Tx.withSavepoint`（同じく「6. エラーの扱い」）。
 `Pool.withLazyTxAfterBegin(pool, onBegin, thunk)` は BEGIN の直後に onBegin を同じ Tx で 1 回流す。`SELECT set_config('app.project_id', $1, true)` のように RLS の印を置くのに使う。
 GraphQL のリゾルバのように、DB を使うかどうかが呼ぶまで分からない単位を 1 つの Tx にしたい所で使う。
 
@@ -674,7 +703,7 @@ CLI やテストのように 1 回だけ開くなら `Jdbc.withConnection(config
 型では止められないので、利用側で thunk のエフェクト集合を見張る（署名に `\ {Db, ...}` 以外の I/O 系のエフェクトが出たら疑う）。
 
 再実行は Tx 単位。PG はデッドロック後に Tx 全体が aborted になるので、文単位の再実行は意味を持たない。
-COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続は autocommit に戻る。ネストは v0 では未対応。
+COMMIT で初めて出るエラー（遅延制約など）も翻訳し、接続は autocommit に戻る。Tx のネストは未対応（部分的な巻き戻しは `Tx.withSavepoint`）。
 
 ### 待ってから呼び直す（backoff と jitter）
 

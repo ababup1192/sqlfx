@@ -310,4 +310,7 @@ pub def registerUser(name: String, email: String): Result[RegisterError, Int64] 
 - 生の SQL 文字列を渡す `Sql.*` には `RawSql` が付く（`src/Db/RawSql.flix`）。防止ではなく責任の所在を示す標識で、境界と生成コードが `RawSql.runWithAllow` で許可する。生成関数の許可は生成器の文字列だけを囲み、slot の `Fragment.rawPred` は呼び出し側に残る
 - `DbTest.runRecordingWith(rowsFor, affected, thunk)`: SQL ごとに行を返しつつ記録する。preload の「クエリは 2 つ」を確かめるのに使う
 - `--` から行末は JDBC ハンドラでも落とす（コメント中の `'` や `$1` を見ないため）
+- `SqlSavepoint`（`src/Db/Savepoint.flix`）: `control(command: Savepoint.Command): Result[DbErrorKind, Unit]` の 1 op。`Tx.withSavepoint(name, thunk)` が
+  `SAVEPOINT` → thunk → `RELEASE` / `ROLLBACK TO` の形で使い、中の失敗を `Result[Failure, a]` にして外の Tx を続ける。読むだけの Tx でも張れるよう
+  `SqlWrite` とは別の効果にした。JDBC / Pool / DbTest の handler が並べて受ける（`runLogging` は転送しない）
 - `Preload.attach({ parents, parentKey, children, childKey })`: IN 句バッチで取った子を親ごとに束ねる。子は元の順、無い親は Nil。`keyed` の preloader 生成（フェーズ 3）もこれを呼ぶ

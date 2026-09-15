@@ -6,36 +6,42 @@ mod DbTest {
 
     ///
     /// どの SELECT にも同じ rows を返す。ユースケース関数を DB 無しで走らせる最小のハンドラ。
+    /// SAVEPOINT の命令（`Tx.withSavepoint`）は全部通す。
     ///
-    pub def runWithRows(rows: List[Row], thunk: Unit -> a \ ef): a \ ef - SqlRead =
+    pub def runWithRows(rows: List[Row], thunk: Unit -> a \ ef): a \ ef - {SqlRead, SqlSavepoint} =
         run {
             thunk()
         } with handler SqlRead {
             def fetch(_sql, _params, resume) = resume(Ok(rows))
+        } with handler SqlSavepoint {
+            def control(_command, resume) = resume(Ok(()))
         }
 
     ///
     /// SQL 文字列ごとに返す rows を変える。`rowsFor` が None を返した SQL は空の結果。
     ///
-    pub def runWithTable(rowsFor: String -> Option[List[Row]], thunk: Unit -> a \ ef): a \ ef - SqlRead =
+    pub def runWithTable(rowsFor: String -> Option[List[Row]], thunk: Unit -> a \ ef): a \ ef - {SqlRead, SqlSavepoint} =
         run {
             thunk()
         } with handler SqlRead {
             def fetch(sql, _params, resume) = resume(Ok(rowsFor(sql) |> Option.getWithDefault(Nil)))
+        } with handler SqlSavepoint {
+            def control(_command, resume) = resume(Ok(()))
         }
 
     ///
     /// 発行した Statement を順に記録して結果と一緒に返す。SELECT には rows、書き込みには affected を返す。
+    /// SAVEPOINT の命令（`Tx.withSavepoint`）も `SAVEPOINT name` のような文として記録する（params は Nil）。
     /// クエリ数の上限テスト（層 3）と、発行 SQL の比較に使う。
     ///
-    pub def runRecording(rows: List[Row], affected: Int32, thunk: Unit -> a \ ef): (a, List[Statement]) \ ef - {SqlRead, SqlWrite} =
+    pub def runRecording(rows: List[Row], affected: Int32, thunk: Unit -> a \ ef): (a, List[Statement]) \ ef - {SqlRead, SqlWrite, SqlSavepoint} =
         runRecordingWith(_ -> Some(rows), affected, thunk)
 
     ///
     /// runRecording と同じく記録しつつ、SELECT に返す rows は SQL 文字列ごとに変える（runWithTable と同じ引数）。
     /// preload のように「複数の SELECT を出し、その数を確かめたい」テストに使う。
     ///
-    pub def runRecordingWith(rowsFor: String -> Option[List[Row]], affected: Int32, thunk: Unit -> a \ ef): (a, List[Statement]) \ ef - {SqlRead, SqlWrite} =
+    pub def runRecordingWith(rowsFor: String -> Option[List[Row]], affected: Int32, thunk: Unit -> a \ ef): (a, List[Statement]) \ ef - {SqlRead, SqlWrite, SqlSavepoint} =
         region rc {
             let log = Ref.fresh(rc, Nil);
             let record = statement -> Ref.put(statement :: Ref.get(log), log);
@@ -54,6 +60,11 @@ mod DbTest {
                 def executeReturning(sql, params, resume) = {
                     record({ sql = sql, params = params });
                     resume(Ok(rowsFor(sql) |> Option.getWithDefault(Nil)))
+                }
+            } with handler SqlSavepoint {
+                def control(command, resume) = {
+                    record({ sql = Savepoint.toSql(command), params = Nil });
+                    resume(Ok(()))
                 }
             };
             (result, Ref.get(log) |> List.reverse)

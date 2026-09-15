@@ -12,14 +12,52 @@ mod Tx {
     /// BEGIN してから thunk を同じ接続で走らせ、正常なら COMMIT、Transient / DbErr のどちらかが飛べば ROLLBACK して再送出。
     /// thunk の SqlRead / SqlWrite はこの接続で実行する（内側で `Jdbc.runWithConnection` を被せるので、外側で被せ直す必要は無い）。
     ///
-    /// v0 ではネストを扱わない。thunk の中でまた `withTx` を同じ接続で呼ぶと内側の COMMIT で外側も確定する。
-    /// セーブポイントにするか型で禁止するかは v2 で決める（design.md §4.3）。
+    /// ネストは扱わない。thunk の中でまた `withTx` を同じ接続で呼ぶと内側の COMMIT で外側も確定する。
+    /// Tx の一部分だけを巻き戻したいなら `withSavepoint`。
     ///
-    pub def withTx(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite}) + {IO, TransientDbErr, DbErr} =
+    pub def withTx(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         begin(conn);
         match DbError.runWithKind(() -> Jdbc.runWithConnection(conn, thunk)) {
             case Ok(value) => { commit(conn); value }
             case Err(kind) => { rollback(conn); DbError.raise(kind) }
+        }
+
+    ///
+    /// Tx の中の一部分だけを SAVEPOINT で囲む。`SAVEPOINT name` → thunk → 成功なら `RELEASE SAVEPOINT name` で `Ok`、
+    /// thunk が `TransientDbErr` / `DbErr` を投げたら `ROLLBACK TO SAVEPOINT name` で戻して `Err`。中の失敗（statement_timeout、
+    /// 制約違反、aborted）は外の Tx に及ばず、`SET LOCAL` / `set_config(..., true)` も SAVEPOINT の前の値に戻る。
+    /// 読むだけ（`DbRead`）の Tx でも張れる。`RELEASE` / `ROLLBACK TO` 自体の失敗は値にせず、外の Tx の失敗として投げる。
+    ///
+    /// ```
+    /// Tx.withSavepoint("agg", () -> { discard Sql.execute("SET LOCAL statement_timeout = 5000", Nil); countEntries(scope) })
+    /// //   : Result[Failure, Int64] \ DbWrite + SqlSavepoint + RawSql
+    /// ```
+    ///
+    /// name は `Savepoint.isValidName`（`^[a-z_][a-z0-9_]*$`、63 文字まで）を通った物だけ SQL に入る。それ以外は SQL を出さずに `Err`。
+    ///
+    /// WhyNot: 名前が不正なときに `DbErr` を投げないのは、呼ぶ側にとっては「この部分の失敗」であって外の Tx を壊す理由が無いため。
+    ///
+    /// WhyNot: `Db.attempt` と同じ `Failure` で返すのは、中で受けたい失敗の代表が statement_timeout（Transient）で、
+    /// 呼ぶ側が一時障害と永続の失敗を分けて扱えるようにするため。
+    ///
+    pub def withSavepoint(name: String, thunk: Unit -> a \ ef): Result[DbError.Failure, a] \ (ef - {TransientDbErr, DbErr}) + {SqlSavepoint, TransientDbErr, DbErr} =
+        if (not Savepoint.isValidName(name))
+            Err(DbError.Failure.Permanent(DbError.DbErrorKind.Other("invalid savepoint name: ${name} (${Savepoint.nameRule()})")))
+        else {
+            control(Savepoint.Command.Savepoint(name));
+            match DbError.runWithFailure(thunk) {
+                case Ok(value)    => { control(Savepoint.Command.Release(name)); Ok(value) }
+                case Err(failure) => { control(Savepoint.Command.RollbackTo(name)); Err(failure) }
+            }
+        }
+
+    ///
+    /// SAVEPOINT の命令を 1 つ発行し、handler が返した失敗を呼び出し側の文脈で op にする。
+    ///
+    def control(command: Savepoint.Command): Unit \ {SqlSavepoint, TransientDbErr, DbErr} =
+        match SqlSavepoint.control(command) {
+            case Ok(())   => ()
+            case Err(kind) => DbError.raise(kind)
         }
 
     ///

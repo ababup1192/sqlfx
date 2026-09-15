@@ -321,7 +321,8 @@ mod Db {
     ///
     /// attempt は Tx を巻き戻さない。`withLazyTx` の thunk の中で使うと、DB で落ちた SQL の後は Tx が aborted のままで
     /// COMMIT されず `DbErr.rollback` になり、DB に届く前の失敗なら `Err` が普通の戻り値になって COMMIT される。
-    /// Tx の外か `withConnection` の中で使い、Tx の中で失敗を値にしたいなら `Pool.withLazyTxResult`。
+    /// Tx の外か `withConnection` の中で使い、Tx の中で失敗を値にしたいなら `Pool.withLazyTxResult`、
+    /// Tx の一部分だけを巻き戻して続けたいなら `Tx.withSavepoint`。
     ///
     pub def attempt(thunk: Unit -> a \ ef): Result[DbError.Failure, a] \ ef - {TransientDbErr, DbErr} =
         DbError.runWithFailure(thunk)
