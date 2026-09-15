@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.4.2"
+"github:ababup1192/sqlfx" = "0.4.3"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -580,6 +580,12 @@ HikariCP はどちらでも同じ "request timed out" の文言を出すので�
 |---|---|
 | `DbErr.runWithResult` が返す `Result[String, _]` | `Result[DbErrorKind, _]`（文言は `DbError.describe(kind)`） |
 | thunk の中で handler を張った内側の try/catch を自前で書く | `Db.guard(thunk)`（上の「触ってはいけない形」） |
+
+### 0.4.2 からの移行
+
+| 0.4.2 | 0.4.3 |
+|---|---|
+| Tx の中の一部分の失敗（`statement_timeout` など）で Tx 全体が aborted | `Tx.withSavepoint(name, thunk)` で囲めば、その部分だけ `ROLLBACK TO SAVEPOINT` して続けられる（新しい effect `SqlSavepoint`。`Db` / `DbRead` の alias には入っていないので、使う関数だけが `+ SqlSavepoint` を書く） |
 
 ### 0.4.1 からの移行
 
