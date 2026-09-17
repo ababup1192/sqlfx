@@ -28,3 +28,16 @@ def testParseThenRender(): Unit \ Assert =
                 + "}")
         |> Result.map(List.map(QRender.toSql));
     Assert.assertEq(expected = Ok(List#{("SELECT id FROM users WHERE deleted_at IS NULL AND TRUE  LIMIT $1", List#{"limit"})}), rendered)
+
+/// NOT NULL の marker `!` は SQL に出ない。`!=` `!~` の演算子と文字列リテラルの中の `!` は残る。
+///
+///   (id!=1)::boolean! AS flag, count(*)::bigint! AS n, 'a!' AS s ... WHERE name !~ 'x'
+///   → (id!=1)::boolean AS flag, count(*)::bigint AS n, 'a!' AS s ... WHERE name !~ 'x'
+@Test
+def testMarkerIsDroppedFromSql(): Unit \ Assert =
+    let rendered = QParser.parseFile("query q() -> many { SELECT (id!=1)::boolean! AS flag, count(*)::bigint! AS n, 'a!' AS s FROM users WHERE name !~ 'x' }")
+        |> Result.map(List.map(queryDef -> (fst(QRender.toSql(queryDef)), fst(QRender.toAnnotatedSql(queryDef)))));
+    Assert.assertEq(expected = Ok(List#{(
+        "SELECT (id!=1)::boolean AS flag, count(*)::bigint AS n, 'a!' AS s FROM users WHERE name !~ 'x'",
+        "SELECT (id!=1)::boolean! AS flag, count(*)::bigint! AS n, 'a!' AS s FROM users WHERE name !~ 'x'"
+    )}), rendered)

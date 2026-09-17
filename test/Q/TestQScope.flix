@@ -28,6 +28,16 @@ def testScopeAccepts(): Unit \ Assert =
             + "query e() -> many { SELECT id FROM users }\n"
             + "query f(p: Int64) -> many { SELECT e.id FROM users AS u JOIN entries AS e ON e.project_id = :p }"))
 
+/// NOT NULL の marker `!` と、FROM の関数（`unnest(...)`）は検査に影響しない: `project_id::bigint!` でも列の名前は見つかり、
+/// `unnest` は表ではないので触る表に数えない（entries を触りつつ条件が無ければ止まる）。
+@Test
+def testScopeIgnoresMarkerAndFunctionSource(): Unit \ Assert =
+    Assert.assertEq(
+        expected = (Ok(()), Err("Unscoped(b, entries, project_id)")),
+        (checkSource("query a(p: Int64) -> one { SELECT count(*)::bigint! AS n, project_id::bigint! AS pid FROM entries WHERE project_id = :p GROUP BY project_id }\n"
+                + "query c(ids: List[Int64], titles: List[String], p: Int64) -> exec { UPDATE entries AS e SET title = v.t FROM unnest(:ids, :titles) AS v(id, t) WHERE e.id = v.id AND e.project_id = :p }"),
+         checkSource("query b(ids: List[Int64], titles: List[String]) -> exec { UPDATE entries AS e SET title = v.t FROM unnest(:ids, :titles) AS v(id, t) WHERE e.id = v.id }")))
+
 /// 列の名前が無い query は止まる。最初の違反を (クエリ名, 表, 列) で返す。
 @Test
 def testScopeRejectsMissingColumn(): Unit \ Assert =

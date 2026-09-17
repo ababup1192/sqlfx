@@ -48,6 +48,78 @@ def testResolveShapes(): Unit \ Assert =
         ("k", List#{("id", SqlType.Int64, false)})
     }), result)
 
+/// NOT NULL の marker `!`: `::type!` の式は NOT NULL、無ければ式は NULL 可。副問い合わせの列、列参照（NULL 可の email、LEFT JOIN の相手）、
+/// FILTER / OVER 付き、AS 無しの alias、`!=` を含む式（演算子は marker でない）も同じ規則。
+///
+///   a: count(*)::bigint! AS total            → total: Int64 NOT NULL
+///   b: count(*)::bigint AS total             → total: NULL 可（marker 無し）
+///   c: hits.id::text! / hits.total::bigint   → 副問い合わせの列。marker の有無で分かれる
+///   d: email::text! AS email, id::bigint!    → DDL が NULL 可でも marker が勝つ / NOT NULL の列に付けても無害
+///   e: LEFT JOIN の p.title::text! AS title  → JOIN で NULL 可になる列も marker で NOT NULL
+///   f: FILTER (...)::bigint! / OVER ()::bigint!
+///   g: count(*)::bigint! total               → AS 無しの alias
+///   h: (id != 1)::boolean! AS flag           → `!=` は残り、末尾の `!` だけが marker
+@Test
+def testResolveNotNullMarker(): Unit \ Assert =
+    let result = resolveAll(
+        "query a() -> one { SELECT count(*)::bigint! AS total FROM users }\n"
+            + "query b() -> one { SELECT count(*)::bigint AS total FROM users }\n"
+            + "query c() -> many { SELECT hits.id::text! AS id, hits.total::bigint AS total FROM (SELECT id, count(*) OVER () AS total FROM users) AS hits }\n"
+            + "query d() -> many { SELECT email::text! AS email, id::bigint! FROM users WHERE email IS NOT NULL }\n"
+            + "query e() -> many { SELECT u.id, p.title::text! AS title FROM users u LEFT JOIN posts p ON p.user_id = u.id }\n"
+            + "query f() -> one { SELECT count(*) FILTER (WHERE email IS NULL)::bigint! AS missing, count(*) OVER ()::bigint! AS total FROM users }\n"
+            + "query g() -> one { SELECT count(*)::bigint! total FROM users }\n"
+            + "query h() -> many { SELECT (id != 1)::boolean! AS flag FROM users }");
+    Assert.assertEq(expected = Ok(List#{
+        ("a", List#{("total", SqlType.Int64, false)}),
+        ("b", List#{("total", SqlType.Int64, true)}),
+        ("c", List#{("id", SqlType.Str, false), ("total", SqlType.Int64, true)}),
+        ("d", List#{("email", SqlType.Str, false), ("id", SqlType.Int64, false)}),
+        ("e", List#{("id", SqlType.Int64, false), ("title", SqlType.Str, false)}),
+        ("f", List#{("missing", SqlType.Int64, false), ("total", SqlType.Int64, false)}),
+        ("g", List#{("total", SqlType.Int64, false)}),
+        ("h", List#{("flag", SqlType.Bool, false)})
+    }), result)
+
+/// marker の置き場所の誤り: cast の無い式 / 列参照だけ / cast と `!` の間に空白 / marker はあるが名前が無い。
+///
+///   count(*)! AS n           → MisplacedNotNullMark（cast が無い）
+///   id! AS n                 → MisplacedNotNullMark（列参照には付けない）
+///   count(*)::bigint ! AS n  → MisplacedNotNullMark（空白で離れた `!` は marker でない）
+///   count(*)::bigint!        → UntypedColumn（式の列は名前が要る。marker を付けても同じ）
+@Test
+def testResolveMisplacedNotNullMarker(): Unit \ Assert =
+    let errors = List#{
+        "query a() -> one { SELECT count(*)! AS n FROM users }",
+        "query a() -> one { SELECT id! AS n FROM users }",
+        "query a() -> one { SELECT count(*)::bigint ! AS n FROM users }",
+        "query a() -> one { SELECT count(*)::bigint! FROM users }"
+    } |> List.map(source -> resolveAll(source) |> Result.map(List.length));
+    Assert.assertEq(expected = List#{
+        Err("MisplacedNotNullMark(a, count ( * ) !)"),
+        Err("MisplacedNotNullMark(a, id!)"),
+        Err("MisplacedNotNullMark(a, count ( * ) :: bigint !)"),
+        Err("UntypedColumn(a, count ( * ))")
+    }, errors)
+
+/// 関数の table source（`unnest(...) AS v(...)`）はサブクエリと同じく opaque に飛ばす: exec の `UPDATE … FROM unnest(:a, :b)` が通り、
+/// SELECT では v の列を `expr::type AS name` で書けば読める。JOIN の相手が関数でも表の列は残る。
+///
+///   a: UPDATE users AS u SET name = v.name FROM unnest(:ids, :names) AS v(id, name) WHERE u.id = v.id   → exec、列無し
+///   b: SELECT v.n::int! AS n FROM unnest(:ns) AS v(n)                                                   → n: Int32 NOT NULL
+///   c: SELECT u.id, v.n::int AS n FROM users u JOIN unnest(:ns) AS v(n) ON v.n = u.id                  → id は users の列
+@Test
+def testResolveFunctionSource(): Unit \ Assert =
+    let result = resolveAll(
+        "query a(ids: List[Int64], names: List[String]) -> exec { UPDATE users AS u SET name = v.name FROM unnest(:ids, :names) AS v(id, name) WHERE u.id = v.id }\n"
+            + "query b(ns: List[Int32]) -> many { SELECT v.n::int! AS n FROM unnest(:ns) AS v(n) }\n"
+            + "query c(ns: List[Int32]) -> many { SELECT u.id, v.n::int AS n FROM users u JOIN unnest(:ns) AS v(n) ON v.n = u.id }");
+    Assert.assertEq(expected = Ok(List#{
+        ("a", Nil),
+        ("b", List#{("n", SqlType.Int32, false)}),
+        ("c", List#{("id", SqlType.Int64, false), ("n", SqlType.Int32, true)})
+    }), result)
+
 /// 読みか書きかは文の種類で決まる。RETURNING 付きの書き込みは列を返すが書き込み扱い。
 @Test
 def testResolveWrites(): Unit \ Assert =

@@ -20,7 +20,7 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "7"
+    pub def version(): String = "8"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
@@ -75,7 +75,7 @@ mod Codegen {
                     "    use Decoder.Decoder",
                     "",
                     "    ///",
-                    "    /// 生成元 ${fileName} のハッシュ。テストで .q の現物と照合する。",
+                    "    /// 生成元 ${fileName} のハッシュ。`gen --check` が .q の現物と照合する。",
                     "    ///",
                     "    pub def sourceHash(): Int32 = ${sourceHash(source)}",
                     "",
@@ -278,13 +278,13 @@ mod Codegen {
         List.reverse(lines)
 
     ///
-    /// 本文を `"..." + filterSql + "..."` に組む。`:name` は `$n` に置く。
+    /// 本文を `"..." + filterSql + "..."` に組む。`:name` は `$n` に置き、NOT NULL の marker `!` は落とす。
     ///
     def renderSqlConcat(queryDef: Query): String =
         let (_, orderedNames) = QRender.toSql(queryDef);
         queryDef#body
             |> List.map(segment -> match segment {
-                case Segment.Text(text) => Ok(text)
+                case Segment.Text(text) => Ok(SqlTokens.dropNotNullMarks(text))
                 case Segment.ParamRef(name) => Ok("$${(List.indexOf(name, orderedNames) |> Option.getWithDefault(0)) + 1}")
                 case Segment.SlotRef(name) => Err("${name}Sql")
             })

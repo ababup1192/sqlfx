@@ -212,5 +212,14 @@ mod Decoder {
         Decoder.Decoder(columns, row -> decode(row) |> Result.flatMap(j -> FromJson.fromJson(j) |> Result.mapErr(e -> DecodeError.InvalidJson(name, "${e}"))))
     pub def int64Array(name: String): Decoder[List[Int64]] = typed({ name = name, expected = "Int64Array" }, SqlValue.asInt64Array)
     pub def strArray(name: String): Decoder[List[String]] = typed({ name = name, expected = "StrArray" }, SqlValue.asStrArray)
+    pub def int32Array(name: String): Decoder[List[Int32]] = typed({ name = name, expected = "Int32Array" }, SqlValue.asInt32Array)
+
+    ///
+    /// JSONB[] の各要素を標準ライブラリの Json に parse する。1 つでも読めなければ InvalidJson。
+    ///
+    pub def jsonArray(name: String): Decoder[List[Util.Json.Json]] =
+        let Decoder.Decoder(columns, decode) = typed({ name = name, expected = "JsonArray" }, SqlValue.asJsonArray);
+        Decoder.Decoder(columns, row -> decode(row) |> Result.flatMap(texts ->
+            Result.traverse(text -> Util.Json.parse(text) |> Result.mapErr(e -> DecodeError.InvalidJson(name, "${e}")), texts)))
 
 }

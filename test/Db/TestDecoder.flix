@@ -192,3 +192,26 @@ def testJsonAs(): Unit \ Assert =
     Assert.assertEq(
         expected = (Ok(Map#{"n" => 1}), Ok(Vector#{1, 2}), Err("meta")),
         (asMap, asVector, mismatch |> Result.mapErr(Decoder.errorColumn)))
+
+// ---- 配列 ----
+
+/// jsonArray は JSONB[] の各要素を Json に parse し、int32Array は INTEGER[] をそのまま返す。1 つでも読めない要素があれば InvalidJson。
+///
+///   js = {"{\"n\": 1}", "[2]"} / bad = {"{", "[]"} / ns = {7, -3}
+@Test
+def testArrayDecoders(): Unit \ Assert =
+    let row = Row.makeRows(
+            List#{"js", "bad", "ns"},
+            List#{List#{SqlValue.JsonArray(List#{"{\"n\": 1}", "[2]"}), SqlValue.JsonArray(List#{"{", "[]"}), SqlValue.Int32Array(List#{7, -3})}})
+        |> List.head
+        |> Option.getWithDefault({ columns = Map#{}, cells = Vector#{} });
+    Assert.assertEq(
+        expected = (
+            Ok(List#{Util.Json.Json.JObject(Map#{"n" => Util.Json.Json.JNumber(1ff)}), Util.Json.Json.JArray(Vector#{Util.Json.Json.JNumber(2ff)})}),
+            true,
+            Ok(List#{7, -3})),
+        (
+            Decoder.decodeRow(Decoder.jsonArray("js"), row),
+            Decoder.decodeRow(Decoder.jsonArray("bad"), row) |> Result.mapErr(Decoder.errorColumn) == Err("bad"),
+            Decoder.decodeRow(Decoder.int32Array("ns"), row)
+        ))

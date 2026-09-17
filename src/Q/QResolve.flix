@@ -1,9 +1,11 @@
 ///
 /// `.q` の SQL を机上のスキーマに当てて、結果の列（名前・型・NULL 可否）を決める。生成器はこの結果から型とデコーダを吐く。
-/// 読むのは SELECT の FROM / JOIN とリストだけ。式の列は `expr::type AS name` の形でだけ受け付ける。
+/// 読むのは SELECT の FROM / JOIN とリストだけ。式の列は `expr::type AS name` の形でだけ受け付け、
+/// NULL 可否は cast の直後の marker `!`（`expr::type! AS name`）で書き手が主張する。
 ///
-/// WhyNot: 式の型を推論しないのは、PG の関数の戻り型表を持ち込むことになるから。
-/// キャストを書けば EXPLAIN に貼っても同じ意味で、型が SQL 側に明示される。
+/// WhyNot: 式の型と NULL 可否を推論しないのは、PG の関数の戻り型表（`count` は NOT NULL、`max` は NULL 可、…）を
+/// 持ち込むことになるから。型は cast で SQL 側に明示し、NULL 可否は書き手が `!` で主張して、実行時の decode が検証する
+/// （NULL が来れば `DbErr.decodeError`。黙って既定値にはしない）。
 ///
 mod QResolve {
 
@@ -26,6 +28,8 @@ mod QResolve {
         case UnsupportedColumnType(String, String)
         /// (クエリ名, 式) 型が決められない。`::type AS name` を書く
         case UntypedColumn(String, String)
+        /// (クエリ名, 式) NOT NULL の marker `!` が `::type` の直後に無い。`expr::bigint! AS name` の形に直す
+        case MisplacedNotNullMark(String, String)
         /// (クエリ名, 先頭の語) one / many は SELECT か RETURNING 付きの書き込み、exec は RETURNING 無しの書き込みだけ
         case UnsupportedStatement(String, String)
         /// (クエリ名, 列名) keyed の列が結果に無い
@@ -63,7 +67,7 @@ mod QResolve {
     type alias Source = { table = Table, label = String, nullable = Bool }
 
     pub def resolve(schema: Schema, queryDef: Query): Result[ResolveError, Resolved] =
-        let (sql, _) = QRender.toSql(queryDef);
+        let (sql, _) = QRender.toAnnotatedSql(queryDef);
         let words = SqlTokens.tokenize(sql);
         let firstWord = List.head(words) |> Option.getWithDefault("") |> String.toUpperCase;
         let unsupported = ResolveError.UnsupportedStatement(queryDef#name, firstWord);
@@ -144,24 +148,32 @@ mod QResolve {
             case ")" :: rest => sourceLoop(queryName, schema, rest, acc, ")", depth - 1)
             case word :: rest if depth == 0 and String.toUpperCase(word) == "OUTER" => sourceLoop(queryName, schema, rest, acc, previous, depth)
             case word :: rest if depth == 0 and isTableIntroducer(String.toUpperCase(word), previous) =>
+                let upper = String.toUpperCase(word);
                 let leftSideNullable = previous == "RIGHT" or previous == "FULL";
                 let joined = if (leftSideNullable) List.map(source -> { table = source#table, label = source#label, nullable = true }, acc) else acc;
-                readSource(queryName, schema, rest, joined, previous == "LEFT" or previous == "FULL")
+                readSource(queryName, schema, rest, joined, { nullable = previous == "LEFT" or previous == "FULL", functionAllowed = upper == "FROM" or upper == "JOIN" })
             case "," :: rest if depth == 0 and inFromClause(acc, previous) =>
-                readSource(queryName, schema, rest, acc, false)
+                readSource(queryName, schema, rest, acc, { nullable = false, functionAllowed = true })
             case word :: rest => sourceLoop(queryName, schema, rest, acc, String.toUpperCase(word), depth)
         }
 
     ///
-    /// テーブル名と label を読み、続きへ。`(` が来たらサブクエリなので飛ばす（v1 では解決しない）。
+    /// テーブル名と label を読み、続きへ。`(` が来たらサブクエリ、`name (` なら関数（`unnest(:rows) AS v(a, b)`）で、
+    /// どちらも列の分からない opaque な table source として飛ばす。列は解決しないので、その列を SELECT に出すなら `expr::type AS name` で書く。
     ///
-    def readSource(queryName: String, schema: Schema, words: List[String], acc: List[Source], nullable: Bool): Result[ResolveError, List[Source]] =
+    /// WhyNot: 関数の列を引数の型（`jsonb[]` → `jsonb`）から引かないのは、`unnest` の多引数形や `WITH ORDINALITY`、
+    /// `jsonb_to_recordset(...) AS x(a int, b text)` の列定義まで読む本格版になり、FROM を読む範囲がサブクエリと不揃いになるため。
+    ///
+    /// `functionAllowed` は FROM / JOIN の後ろだけ true。`INSERT INTO users (name)` の `(` は列の並びで、関数ではない。
+    ///
+    def readSource(queryName: String, schema: Schema, words: List[String], acc: List[Source], mode: { nullable = Bool, functionAllowed = Bool }): Result[ResolveError, List[Source]] =
         match words {
             case "(" :: _ => sourceLoop(queryName, schema, words, acc, "SUBQUERY", 0)
+            case name :: "(" :: rest if mode#functionAllowed and isIdentifier(name) => sourceLoop(queryName, schema, "(" :: rest, acc, "SUBQUERY", 0)
             case name :: rest =>
                 let (label, afterAlias) = readAlias(rest);
                 match Schema.findTable(name, schema) {
-                    case Some(table) => sourceLoop(queryName, schema, afterAlias, { table = table, label = label, nullable = nullable } :: acc, "SOURCE", 0)
+                    case Some(table) => sourceLoop(queryName, schema, afterAlias, { table = table, label = label, nullable = mode#nullable } :: acc, "SOURCE", 0)
                     case None => Err(ResolveError.UnknownTable(queryName, name))
                 }
             case Nil => Ok(List.reverse(acc))
@@ -217,20 +229,28 @@ mod QResolve {
 
     ///
     /// リストの 1 項目。`*` / `t.*` / `col` / `t.col` / `col::type` / `expr::type AS name` / `col AS name`。
+    /// `::type!` の marker は cast の直後にだけ置ける。それ以外の位置（`count(*)!`、`id!`、`bigint !`）は MisplacedNotNullMark。
+    ///
+    /// WhyNot: cast の無い式に `!` を許さないのは、cast が無いと型が決まらず、marker は NULL 可否しか言わないから。
+    /// 列参照（`id!`）にも許さないのは、marker の綴りを `::type!` の 1 つに固定して、`id!` と `id::bigint!` の 2 通りを作らないため。
     ///
     def resolveItem(queryName: String, sources: List[Source], item: List[String]): Result[ResolveError, List[ResultColumn]] =
         match item {
             case "*" :: Nil => Ok(List.flatMap(allColumns, sources))
             case label :: "." :: "*" :: Nil => Ok(List.filter(source -> source#label == label or source#table#name == label, sources) |> List.flatMap(allColumns))
             case _ =>
-                let (expression, label) = splitAlias(item);
+                let (annotated, label) = splitAlias(item);
+                let (expression, asserted) = splitNotNullMark(annotated);
+                let misplaced = ResolveError.MisplacedNotNullMark(queryName, List.join(" ", annotated));
                 match expression {
-                    case ref :: "::" :: castType => castColumn(queryName, sources, ref, castType, label)
                     case Nil => Err(ResolveError.UntypedColumn(queryName, List.join(" ", item)))
+                    case _ if List.last(expression) == Some("!") => Err(misplaced)
+                    case ref :: "::" :: castType => castColumn(queryName, sources, ref, castType, label, asserted)
                     case _ =>
                         match List.reverse(expression) {
                             case castType :: "::" :: rest if not List.isEmpty(rest) =>
-                                castExpression(queryName, List.reverse(rest), castType, label)
+                                castExpression(queryName, List.reverse(rest), castType, label, asserted)
+                            case _ if asserted => Err(misplaced)
                             case _ => plainColumn(queryName, sources, expression, label)
                         }
                 }
@@ -249,6 +269,16 @@ mod QResolve {
         }
 
     ///
+    /// 末尾の語に付いた NOT NULL の marker（`bigint!`）を外し、付いていたかを返す。
+    ///
+    def splitNotNullMark(expression: List[String]): (List[String], Bool) =
+        match List.reverse(expression) {
+            case last :: rest if String.endsWith(suffix = "!", last) and last != "!" =>
+                (List.reverse(String.dropRight(1, last) :: rest), true)
+            case _ => (expression, false)
+        }
+
+    ///
     /// `col` / `t.col`。
     ///
     def plainColumn(queryName: String, sources: List[Source], expression: List[String], label: Option[String]): Result[ResolveError, List[ResultColumn]] =
@@ -259,22 +289,25 @@ mod QResolve {
         }
 
     ///
-    /// `col::type`。列が解決できれば NULL 可否は列の物、名前は label か列名。
+    /// `col::type` / `col::type!`。列が解決できれば NULL 可否は列の物、名前は label か列名。`!` が付けば NOT NULL。
     ///
-    def castColumn(queryName: String, sources: List[Source], ref: String, castType: List[String], label: Option[String]): Result[ResolveError, List[ResultColumn]] =
+    /// WhyNot: DDL が NOT NULL の列に `!` が付いても弾かないのは、LEFT JOIN の相手や WHERE で NULL を除いた列を
+    /// NOT NULL と主張する経路と同じ綴りだから。DDL と marker のどちらかが NOT NULL と言えば NOT NULL で、decode が検証する。
+    ///
+    def castColumn(queryName: String, sources: List[Source], ref: String, castType: List[String], label: Option[String], asserted: Bool): Result[ResolveError, List[ResultColumn]] =
         forM (
             sqlType <- parseCast(queryName, castType);
             column <- lookup(queryName, sources, None, ref)
-        ) yield List#{ { name = Option.getWithDefault(column#name, label), columnType = sqlType, nullable = column#nullable } }
+        ) yield List#{ { name = Option.getWithDefault(column#name, label), columnType = sqlType, nullable = column#nullable and not asserted } }
 
     ///
-    /// `expr::type AS name`。名前は必須、NULL 可否は分からないので true。
+    /// `expr::type AS name` / `expr::type! AS name`。名前は必須。NULL 可否は `!` が無ければ true（関数の型表を持たない）、あれば false。
     ///
-    def castExpression(queryName: String, expression: List[String], castType: String, label: Option[String]): Result[ResolveError, List[ResultColumn]] =
+    def castExpression(queryName: String, expression: List[String], castType: String, label: Option[String], asserted: Bool): Result[ResolveError, List[ResultColumn]] =
         forM (
             sqlType <- parseCast(queryName, List#{castType});
             name <- label |> Option.toOk(ResolveError.UntypedColumn(queryName, List.join(" ", expression)))
-        ) yield List#{ { name = name, columnType = sqlType, nullable = true } }
+        ) yield List#{ { name = name, columnType = sqlType, nullable = not asserted } }
 
     def parseCast(queryName: String, castType: List[String]): Result[ResolveError, SqlType] =
         let spelling = List.join(" ", castType) |> String.toLowerCase;

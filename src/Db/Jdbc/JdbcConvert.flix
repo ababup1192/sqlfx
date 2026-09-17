@@ -3,6 +3,7 @@
 ///
 mod JdbcConvert {
 
+    import java.lang.Integer
     import java.lang.Long
     import java.lang.Object
 
@@ -143,6 +144,16 @@ mod JdbcConvert {
                 List.forEachWithIndex((i, x) -> Array.put(checked_cast(x), i, boxed), xs);
                 statement.setArray(index, conn.createArrayOf("text", boxed))
             }
+            case SqlValue.Int32Array(xs) => region rc {
+                let boxed: Array[Object, rc] = Array.empty(rc, List.length(xs));
+                List.forEachWithIndex((i, x) -> Array.put(checked_cast(Integer.valueOf(x)), i, boxed), xs);
+                statement.setArray(index, conn.createArrayOf("integer", boxed))
+            }
+            case SqlValue.JsonArray(xs) => region rc {
+                let boxed: Array[Object, rc] = Array.empty(rc, List.length(xs));
+                List.forEachWithIndex((i, x) -> Array.put(checked_cast(x), i, boxed), xs);
+                statement.setArray(index, conn.createArrayOf("jsonb", boxed))
+            }
         }
 
     ///
@@ -165,6 +176,8 @@ mod JdbcConvert {
         case SqlValue.NullType.Json => Types.OTHER
         case SqlValue.NullType.Int64Array => Types.ARRAY
         case SqlValue.NullType.StrArray => Types.ARRAY
+        case SqlValue.NullType.Int32Array => Types.ARRAY
+        case SqlValue.NullType.JsonArray => Types.ARRAY
     }
 
     ///
@@ -221,6 +234,10 @@ mod JdbcConvert {
             rs -> { let a: SqlArray = rs.getArray(index); nullOrConvert(rs, () -> SqlValue.Int64Array(readInt64Array(a))) }
         else if (jdbcType == Types.ARRAY and typeName == "_text")
             rs -> { let a: SqlArray = rs.getArray(index); nullOrConvert(rs, () -> SqlValue.StrArray(readStrArray(a))) }
+        else if (jdbcType == Types.ARRAY and typeName == "_int4")
+            rs -> { let a: SqlArray = rs.getArray(index); nullOrConvert(rs, () -> SqlValue.Int32Array(readInt32Array(a))) }
+        else if (jdbcType == Types.ARRAY and (typeName == "_jsonb" or typeName == "_json"))
+            rs -> { let a: SqlArray = rs.getArray(index); nullOrConvert(rs, () -> SqlValue.JsonArray(readStrArray(a))) }
         else if (jdbcType == Types.OTHER and typeName == "uuid")
             rs -> { let s: String = rs.getString(index); nullOr(rs, SqlValue.Uuid(s)) }
         else if (jdbcType == Types.OTHER and (typeName == "json" or typeName == "jsonb"))
@@ -247,6 +264,10 @@ mod JdbcConvert {
     def readInt64Array(sqlArray: SqlArray): List[Int64] \ IO =
         let rs: ResultSet = sqlArray.getResultSet();
         readArrayElements(rs, r -> r.getLong(2), Nil)
+
+    def readInt32Array(sqlArray: SqlArray): List[Int32] \ IO =
+        let rs: ResultSet = sqlArray.getResultSet();
+        readArrayElements(rs, r -> r.getInt(2), Nil)
 
     def readStrArray(sqlArray: SqlArray): List[String] \ IO =
         let rs: ResultSet = sqlArray.getResultSet();

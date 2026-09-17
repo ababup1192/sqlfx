@@ -152,7 +152,8 @@ query 名前(引数: 型, ...) -> one | many | exec [keyed(列)] [with slot: Pre
 | `-> many` | `List[Row]` | 同上 |
 | `-> exec` | `Int32`（影響行数） | `RETURNING` 無しの INSERT / UPDATE / DELETE |
 
-引数の型は Flix の綴り: `Bool Int32 Int64 Float64 BigDecimal String Bytes Timestamp Date Uuid Json List[Int64] List[String]`。
+引数の型は Flix の綴り: `Bool Int32 Int64 Float64 BigDecimal String Bytes Timestamp Date Uuid Json List[Int32] List[Int64] List[String] List[Json]`。
+`List[Json]`（`jsonb[]`）と `List[Int32]`（`integer[]`）は `unnest(:rows)` で複数行を 1 文に渡す用（下の「式の列と NOT NULL の marker」）。
 `Timestamp` / `Date` / `Uuid` / `Json` は生成コードでも同じ名前の型になる（§5 の「日時と JSON」）。
 どの型も `Option[T]` で包める（`Option[String]` `Option[Timestamp]`）。包みの入れ子（`Option[Option[..]]`）は書けない。
 
@@ -210,9 +211,9 @@ query postWithAuthor(id: Int64) -> one {
     WHERE p.id = :id
 }
 
-// 式の列は ::type AS name で型を書く（推論はしない）
+// 式の列は ::type AS name で型を書く（推論はしない）。NULL にならない物は cast の直後に ! を付けて NOT NULL を主張する
 query countUsers() -> one {
-    SELECT count(*)::bigint AS total FROM users WHERE deleted_at IS NULL
+    SELECT count(*)::bigint! AS total FROM users WHERE deleted_at IS NULL
 }
 
 // 書いて id を返す
@@ -235,6 +236,29 @@ query searchUsers(limit: Int64) -> many
     LIMIT :limit
 }
 ```
+
+### 式の列と NOT NULL の marker（`::type!`）
+
+式の列（`count(*)`、`max(views)`、副問い合わせの `hits.total`、`set_config(...)`）は `expr::type AS name` で型を書く。
+生成器は PG の関数の戻り型表を持たないので、cast が無ければ `UntypedColumn` で止まり、cast だけなら NULL 可（`Option[T]`）になる。
+NULL にならない事を書き手が知っているなら、cast の直後に `!` を付けて NOT NULL を主張する。
+
+```
+query countUsers() -> one { SELECT count(*)::bigint! AS total FROM users }          -- total = Int64
+query maxViews() -> one { SELECT max(views)::bigint AS top FROM posts }             -- top = Option[Int64]（max は行が無いと NULL）
+query hits(ids: List[Int64]) -> many {
+    SELECT hits.id::text! AS id, hits.total::bigint! AS total                        -- 副問い合わせの列も同じ
+    FROM (SELECT id, count(*) OVER () AS total FROM posts WHERE id = ANY(:ids)) AS hits
+}
+```
+
+- `!` は SQL には出ない（生成物の `sql` と doc コメントからは落ちる）。`!=` `!~` の演算子と `'...'` の中の `!` は marker ではない
+- marker は `::type` に直に続ける。`count(*)!`（cast 無し）、`id!`（列参照）、`::bigint !`（空白あり）は `MisplacedNotNullMark` で止まる。
+  列参照でも `email::text! AS email`（DDL は NULL 可だが WHERE で除いた）や LEFT JOIN の相手の列は cast を付ければ主張できる。DDL が NOT NULL の列に付けても無害
+- `FILTER (...)::bigint!`、`OVER (...)::bigint!`、AS 無しの alias（`count(*)::bigint! total`）も同じ
+- 主張は実行時に decode が検証する。NULL が来れば `DbErr.decodeError("total", "column 'total' is NULL")` で落ち、黙って 0 にはならない
+- FROM の `unnest(:ids, :rows) AS v(id, data)` のような関数は、サブクエリと同じく列の分からない table source として通る（`exec` の `UPDATE … FROM unnest(...)` が書ける）。
+  その列を SELECT に出すなら `v.data::jsonb! AS data` のように cast で書く
 
 決まり:
 
@@ -378,7 +402,7 @@ def countPosts(): Int64 \ DbRead + RawSql =
 
 ```
 Null  NullOf(NullType)  Bool  Int32  Int64  Float64  Decimal(BigDecimal)  Str  Bytes
-Timestamp(epoch µs, UTC)  Date(epoch day)  Uuid  Json  Int64Array  StrArray
+Timestamp(epoch µs, UTC)  Date(epoch day)  Uuid  Json  Int64Array  StrArray  Int32Array  JsonArray
 ```
 
 `Null` は型の付かない NULL（結果セットのセルはこれ）。`NullOf(NullType.Str)` は型の付いた NULL で、
@@ -606,6 +630,20 @@ HikariCP はどちらでも同じ "request timed out" の文言を出すので�
 |---|---|
 | `DbErr.runWithResult` が返す `Result[String, _]` | `Result[DbErrorKind, _]`（文言は `DbError.describe(kind)`） |
 | thunk の中で handler を張った内側の try/catch を自前で書く | `Db.guard(thunk)`（上の「触ってはいけない形」） |
+
+### 0.4.5 からの移行
+
+生成物のヘッダが `v8` になる（`make gen` で作り直す）。`.q` に `!` を付けなければ型は変わらない。
+
+| 0.4.5 | 0.4.6 |
+|---|---|
+| 式の列 `count(*)::bigint AS total` は常に `Option[Int64]`。呼ぶ側が `Option.getWithDefault(0i64)` で潰す | `count(*)::bigint! AS total` と書けば `Int64`。`!` 無しは今まで通り `Option[Int64]` |
+| 副問い合わせの列 `hits.total::bigint AS total` も `Option` | 同じく `hits.total::bigint! AS total` で `Option` が外れる |
+| marker の置き場所の誤りは `UntypedColumn` | `ResolveError.MisplacedNotNullMark(query, 式)` が増えた（cast 無し / 列参照だけ / 空白あり） |
+| `QRender.toSql` が `.q` の本文そのまま | `!` を落とした SQL を返す。`!` を残した物は `QRender.toAnnotatedSql`（QResolve だけが使う） |
+| 引数の型は `List[Int64]` / `List[String]` だけ | `List[Int32]`（`integer[]`）と `List[Json]`（`jsonb[]`）が増えた。`SqlValue.Int32Array` / `SqlValue.JsonArray`（要素は JSON の文字列。`SqlValue.ofJsonArray` で `List[Json]` から包む）、`Decoder.int32Array` / `Decoder.jsonArray`、`NullType` にも同名の case |
+| FROM に関数（`unnest(...)`）を書くと `UnknownTable(unnest)` | サブクエリと同じく列の分からない table source として通る（FROM / JOIN の後ろだけ） |
+| 生成物のヘッダの「テストで .q の現物と照合する」 | 「`gen --check` が .q の現物と照合する」（事実に合わせただけ） |
 
 ### 0.4.4 からの移行
 

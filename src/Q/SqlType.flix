@@ -20,6 +20,10 @@ mod SqlType {
         case Int64Array
         /// `text[]` / `List[String]`
         case StrArray
+        /// `integer[]` / `List[Int32]`
+        case Int32Array
+        /// `jsonb[]` / `List[Json]`（`unnest(:rows)` で複数行を 1 文で書く用）
+        case JsonArray
     }
 
     ///
@@ -36,7 +40,7 @@ mod SqlType {
     ///
     pub def all(): List[SqlType] = List#{
         SqlType.Bool, SqlType.Int32, SqlType.Int64, SqlType.Float64, SqlType.Decimal, SqlType.Str, SqlType.Bytes,
-        SqlType.Timestamp, SqlType.Date, SqlType.Uuid, SqlType.Json, SqlType.Int64Array, SqlType.StrArray
+        SqlType.Timestamp, SqlType.Date, SqlType.Uuid, SqlType.Json, SqlType.Int64Array, SqlType.StrArray, SqlType.Int32Array, SqlType.JsonArray
     }
 
     pub def spec(sqlType: SqlType): Spec = match sqlType {
@@ -53,6 +57,8 @@ mod SqlType {
         case SqlType.Json => { flixName = "Json", pgNames = List#{"json", "jsonb"}, flixType = "Util.Json.Json" }
         case SqlType.Int64Array => { flixName = "List[Int64]", pgNames = List#{"bigint[]", "int8[]"}, flixType = "List[Int64]" }
         case SqlType.StrArray => { flixName = "List[String]", pgNames = List#{"text[]", "varchar[]"}, flixType = "List[String]" }
+        case SqlType.Int32Array => { flixName = "List[Int32]", pgNames = List#{"integer[]", "int[]", "int4[]"}, flixType = "List[Int32]" }
+        case SqlType.JsonArray => { flixName = "List[Json]", pgNames = List#{"jsonb[]", "json[]"}, flixType = "List[Util.Json.Json]" }
     }
 
     ///
@@ -88,6 +94,7 @@ mod SqlType {
         case SqlType.Date => "SqlValue.ofDate"
         case SqlType.Uuid => "SqlValue.ofUuid"
         case SqlType.Json => "SqlValue.ofJson"
+        case SqlType.JsonArray => "SqlValue.ofJsonArray"
         case _ => "SqlValue." + ToString.toString(sqlType)
     }
 

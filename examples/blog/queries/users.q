@@ -52,6 +52,7 @@ query softDeleteUser(id: Int64) -> exec {
     UPDATE users SET deleted_at = now() WHERE id = :id AND deleted_at IS NULL
 }
 
+// 式の列は ::type で型を書き、NULL にならない物は ! で NOT NULL を主張する（count は 0 行でも 0 を返す）
 query countUsers() -> one {
-    SELECT count(*)::bigint AS total FROM users WHERE deleted_at IS NULL
+    SELECT count(*)::bigint! AS total FROM users WHERE deleted_at IS NULL
 }

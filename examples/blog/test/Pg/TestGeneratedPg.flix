@@ -11,7 +11,7 @@ def testPgRegisterUser(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let result = BlogTestSupport.withDb(() -> (
         Blog.runRegister(() -> Blog.registerUser({ name = "alice", email = "alice@example.com" })),
         Blog.runRegister(() -> Blog.registerUser({ name = "alice2", email = "alice@example.com" })),
-        UsersQueries.countUsers() |> Option.flatMap(row -> row#total)
+        UsersQueries.countUsers() |> Option.map(row -> row#total)
     ));
     Assert.assertEq(expected = Ok((Ok(1i64), Err(RegisterFailure.EmailTaken("alice@example.com")), Some(1i64))), result)
 

@@ -163,16 +163,16 @@ def testPgTypedNullsBind(): Unit \ {Assert, IO} =
         SqlValue.NullOf(SqlValue.NullType.Float64), SqlValue.NullOf(SqlValue.NullType.Decimal), SqlValue.NullOf(SqlValue.NullType.Str),
         SqlValue.NullOf(SqlValue.NullType.Bytes), SqlValue.NullOf(SqlValue.NullType.Timestamp), SqlValue.NullOf(SqlValue.NullType.Date),
         SqlValue.NullOf(SqlValue.NullType.Uuid), SqlValue.NullOf(SqlValue.NullType.Json), SqlValue.NullOf(SqlValue.NullType.Int64Array),
-        SqlValue.NullOf(SqlValue.NullType.StrArray)
+        SqlValue.NullOf(SqlValue.NullType.StrArray), SqlValue.NullOf(SqlValue.NullType.Int32Array), SqlValue.NullOf(SqlValue.NullType.JsonArray)
     };
     let result = withPg(() -> {
         discard Sql.execute("DROP TABLE IF EXISTS sqlfx_test_typed_nulls", Nil);
         discard Sql.execute("CREATE TABLE sqlfx_test_typed_nulls (bl BOOLEAN, i4 INTEGER, i8 BIGINT, f8 DOUBLE PRECISION, "
-            + "d NUMERIC, s TEXT, b BYTEA, t TIMESTAMPTZ, dt DATE, u UUID, j JSONB, ia BIGINT[], sa TEXT[])", Nil);
-        discard Sql.execute("INSERT INTO sqlfx_test_typed_nulls VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)", typedNulls);
+            + "d NUMERIC, s TEXT, b BYTEA, t TIMESTAMPTZ, dt DATE, u UUID, j JSONB, ia BIGINT[], sa TEXT[], i4a INTEGER[], ja JSONB[])", Nil);
+        discard Sql.execute("INSERT INTO sqlfx_test_typed_nulls VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)", typedNulls);
         Sql.fetchOne("SELECT * FROM sqlfx_test_typed_nulls", Nil) |> Option.map(row -> row#cells |> Vector.toList)
     });
-    Assert.assertEq(expected = Ok(Some(List.repeat(13, SqlValue.Null))), result)
+    Assert.assertEq(expected = Ok(Some(List.repeat(15, SqlValue.Null))), result)
 
 /// 型の付いた NULL は `col = $1` のように PG が型を決められない位置でも文として通る（引ける行は無い。SQL の `= NULL` の意味）。
 @Test
@@ -197,6 +197,24 @@ def testPgMoreTypesRoundTrip(): Unit \ {Assert, IO} =
         Sql.fetchOne("SELECT t, b, f, i, ia FROM sqlfx_test_types", Nil) |> Option.map(row -> row#cells |> Vector.toList)
     });
     Assert.assertEq(expected = Ok(Some(inserted)), result)
+
+/// INTEGER[] と JSONB[] の往復と、`unnest($1, $2)` で 1 文に複数行を渡して読む形（`UPDATE … FROM unnest(...)` の元になる）。
+///
+///   unnest({7, -3}, {'{"a": 1}', '[1, 2]'}) → (7, {"a": 1}), (-3, [1, 2])
+@Test
+def testPgInt32AndJsonArrays(): Unit \ {Assert, IO} =
+    let ns = SqlValue.Int32Array(List#{7, -3});
+    let js = SqlValue.JsonArray(List#{"{\"a\": 1}", "[1, 2]"});
+    let pairDecoder = forA (n <- Decoder.int32("n"); d <- Decoder.jsonText("d")) yield (n, d);
+    let result = withPg(() -> {
+        discard Sql.execute("DROP TABLE IF EXISTS sqlfx_test_arrays", Nil);
+        discard Sql.execute("CREATE TABLE sqlfx_test_arrays (ns INTEGER[], js JSONB[])", Nil);
+        discard Sql.execute("INSERT INTO sqlfx_test_arrays VALUES ($1, $2)", List#{ns, js});
+        let stored = Sql.fetchOne("SELECT ns, js FROM sqlfx_test_arrays", Nil) |> Option.map(row -> row#cells |> Vector.toList);
+        let unnested = Sql.fetchAs(pairDecoder, "SELECT v.n, v.d FROM unnest($1, $2) AS v(n, d)", List#{ns, js});
+        (stored, unnested)
+    });
+    Assert.assertEq(expected = Ok((Some(List#{ns, js}), List#{(7, "{\"a\": 1}"), (-3, "[1, 2]")})), result)
 
 /// 意味を持つ型を実 PG と往復する。書くときは SqlValue.ofTimestamp 等で包み、読むときは Decoder.timestamp 等で意味を持つ型に戻る。
 ///

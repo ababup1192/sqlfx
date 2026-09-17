@@ -1,6 +1,7 @@
 ///
 /// SQL 本文を語に切る字句解析。スキーマ解決（QResolve）が FROM と SELECT リストを見るために使う。
 /// 文字列リテラルは 1 語、`::` は 1 語、`( ) , . *` は単独の語、`$1` は 1 語。
+/// 語に直に続く NOT NULL の marker `!`（`bigint!`）は語の一部（`isNotNullMark`）。
 ///
 mod SqlTokens {
 
@@ -27,11 +28,52 @@ mod SqlTokens {
                 loop(List.drop(List.length(digits), rest), ("$" + charsToString(digits)) :: acc)
             case ch :: _ if isWordChar(ch) =>
                 let word = List.takeWhile(isWordChar, chars);
-                loop(List.drop(List.length(word), chars), charsToString(word) :: acc)
+                let afterWord = List.drop(List.length(word), chars);
+                match afterWord {
+                    case '!' :: following if isNotNullMark(previous = Some(List.last(word) |> Option.getWithDefault(' ')), following) =>
+                        loop(following, (charsToString(word) + "!") :: acc)
+                    case _ => loop(afterWord, charsToString(word) :: acc)
+                }
             case ch :: rest => loop(rest, Char.toString(ch) :: acc)
         }
 
     def isWordChar(ch: Char): Bool = Char.isLetterOrDigit(ch) or ch == '_'
+
+    ///
+    /// `!` が NOT NULL の marker か。直前が語の文字で、直後が `=` `~` `!` でない物（`!=` `!~` `!!` は演算子）。
+    ///
+    /// WhyNot: 空白を挟んだ `bigint !` を marker にしないのは、字句を語に付けた形に固定して、
+    /// SQL から落とす側（`dropNotNullMarks`）と QResolve が見る側の判定を 1 つにするため。
+    ///
+    pub def isNotNullMark(previous: {previous = Option[Char]}, following: List[Char]): Bool =
+        let afterWord = match previous#previous {
+            case Some(ch) => isWordChar(ch)
+            case None => false
+        };
+        let startsOperator = match following {
+            case '=' :: _ => true
+            case '~' :: _ => true
+            case '!' :: _ => true
+            case _ => false
+        };
+        afterWord and not startsOperator
+
+    ///
+    /// SQL から NOT NULL の marker `!` を落とす。文字列リテラルの中は触らない。
+    ///
+    pub def dropNotNullMarks(sql: String): String =
+        dropLoop(String.toList(sql), None, false, Nil) |> List.reverse |> charsToString
+
+    ///
+    /// (未読, 直前の文字, 引用符の中か, 出力の逆順)。
+    ///
+    def dropLoop(chars: List[Char], previous: Option[Char], inQuote: Bool, acc: List[Char]): List[Char] =
+        match chars {
+            case Nil => acc
+            case '\'' :: rest => dropLoop(rest, Some('\''), not inQuote, '\'' :: acc)
+            case '!' :: rest if not inQuote and isNotNullMark(previous = previous, rest) => dropLoop(rest, Some('!'), inQuote, acc)
+            case ch :: rest => dropLoop(rest, Some(ch), inQuote, ch :: acc)
+        }
 
     ///
     /// 開き `'` の後ろから閉じ `'` まで読む。`''` は 1 つの `'` として続ける。戻りは (中身の逆順を正順に, 閉じの後ろ)。

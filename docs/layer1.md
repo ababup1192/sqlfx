@@ -49,9 +49,11 @@ case が足りなければコンパイルエラーになるので、制約を足
 
 ## 解決の規則（QResolve）
 
-- FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM の後ろをテーブルとして読む。`AS` 付き・無しの alias、カンマ区切りの FROM も追う。サブクエリは飛ばす
+- FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM の後ろをテーブルとして読む。`AS` 付き・無しの alias、カンマ区切りの FROM も追う。サブクエリと FROM / JOIN の後ろの関数（`unnest(...)`）は列の分からない table source として飛ばす
 - SELECT リストは `*` / `t.*` / `col` / `t.col` / `col AS name` / `col::type` / `expr::type AS name` だけ。
-  式には型を付けない（`count(*) AS n` はエラー、`count(*)::bigint AS n` と書く。式の列は NULL 可）
+  式には型を付けない（`count(*) AS n` はエラー、`count(*)::bigint AS n` と書く。式の列は NULL 可）。
+  cast の直後の `!`（`count(*)::bigint! AS n`）で書き手が NOT NULL を主張できる。`!` は SQL には出ず、実行時の decode が検証する。
+  `!` が cast の直後以外にあれば `MisplacedNotNullMark`
 - LEFT / RIGHT / FULL [OUTER] JOIN で外側になる方の列は NULL 可になる。修飾無しの列が 2 テーブルにあればエラー
 - `RETURNING` の後ろは SELECT リストと同じ規則で解決する
 - `keyed(col)` は結果の列に無いとエラー、slot のテーブルは FROM に無いとエラー

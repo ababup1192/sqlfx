@@ -1,5 +1,6 @@
 use Fragment.{===, >>=}
 use DbError.DbFailure
+use DbError.DbErrorKind
 
 // 生成した各クエリを、決まったテストデータ（BlogTestSupport.seed）に対して実行し、返る行を丸ごと期待値と比べる。
 // 1 テスト 1 クエリ。テーブル 1 つの物、JOIN した物、断片で絞った物、書き込み後の状態、の順。期待値は Views で名前付きに作る。
@@ -77,8 +78,17 @@ def testSearchUsersFiltered(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
 /// countUsers: 退会者を除いた人数。
 @Test
 def testCountUsers(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
-    let result = BlogTestSupport.withSeed(() -> UsersQueries.countUsers() |> Option.flatMap(row -> row#total));
+    let result = BlogTestSupport.withSeed(() -> UsersQueries.countUsers() |> Option.map(row -> row#total));
     Assert.assertEq(expected = Ok(Some(3i64)), result)
+
+/// topViewsOfUser: `max(views)::bigint!` の marker 付きの列に NULL が来ると（記事の無い carol）、0 にはならず decodeError で落ちる。alice は 5。
+@Test
+def testNotNullMarkerRejectsNull(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let result = BlogTestSupport.withSeed(() -> (
+        PostsQueries.topViewsOfUser(1i64) |> Option.map(row -> row#top),
+        DbError.runWithKind(() -> PostsQueries.topViewsOfUser(3i64) |> Option.map(row -> row#top))
+    ));
+    Assert.assertEq(expected = Ok((Some(5i64), Err(DbErrorKind.DecodeError("top", "column 'top' is NULL")))), result)
 
 // ---- posts（テーブル 1 つ） ----
 
@@ -155,7 +165,7 @@ def testWritesThenRead(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
         let deleted = UsersQueries.softDeleteUser(2i64);
         let deletedAgain = UsersQueries.softDeleteUser(2i64);
         let gone = UsersQueries.findUser(2i64) |> Option.map(row -> row#name);
-        let remaining = UsersQueries.countUsers() |> Option.flatMap(row -> row#total);
+        let remaining = UsersQueries.countUsers() |> Option.map(row -> row#total);
         let viewed = PostsQueries.addView(2i64);
         let views = PostsQueries.postsByUsers(List#{1i64}) |> List.map(row -> (row#title, row#views));
         { renamed = renamed, nameAfter = nameAfter, deleted = deleted, deletedAgain = deletedAgain, gone = gone, remaining = remaining, viewed = viewed, views = views }

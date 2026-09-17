@@ -37,6 +37,10 @@ mod SqlValue {
         case Int64Array(List[Int64])
         /// TEXT[]
         case StrArray(List[String])
+        /// INTEGER[]
+        case Int32Array(List[Int32])
+        /// JSONB[]。要素は JSON の素の文字列。`unnest($1)` で複数行を 1 文に渡す用
+        case JsonArray(List[String])
     }
 
     ///
@@ -57,6 +61,8 @@ mod SqlValue {
         case Json
         case Int64Array
         case StrArray
+        case Int32Array
+        case JsonArray
     }
 
     // ---- 意味を持つ型からの包み。生成コードと Col が使う ----
@@ -76,6 +82,7 @@ mod SqlValue {
     pub def ofDate(d: Date.Date): SqlValue = SqlValue.Date(Date.toEpochDay(d))
     pub def ofUuid(u: Uuid.Uuid): SqlValue = SqlValue.Uuid(Uuid.toText(u))
     pub def ofJson(j: Util.Json.Json): SqlValue = SqlValue.Json(Util.Json.toCompactString(j))
+    pub def ofJsonArray(js: List[Util.Json.Json]): SqlValue = SqlValue.JsonArray(List.map(Util.Json.toCompactString, js))
 
     ///
     /// デコーダのエラーメッセージに出す型名。
@@ -96,6 +103,8 @@ mod SqlValue {
         case SqlValue.Json(_) => "Json"
         case SqlValue.Int64Array(_) => "Int64Array"
         case SqlValue.StrArray(_) => "StrArray"
+        case SqlValue.Int32Array(_) => "Int32Array"
+        case SqlValue.JsonArray(_) => "JsonArray"
     }
 
     ///
@@ -209,6 +218,22 @@ mod SqlValue {
     ///
     pub def asStrArray(value: SqlValue): Option[List[String]] = match value {
         case SqlValue.StrArray(xs) => Some(xs)
+        case _ => None
+    }
+
+    ///
+    /// INTEGER[] を取り出す。型が違えば None。
+    ///
+    pub def asInt32Array(value: SqlValue): Option[List[Int32]] = match value {
+        case SqlValue.Int32Array(xs) => Some(xs)
+        case _ => None
+    }
+
+    ///
+    /// JSONB[] の要素（JSON の素の文字列）を取り出す。型が違えば None。
+    ///
+    pub def asJsonArray(value: SqlValue): Option[List[String]] = match value {
+        case SqlValue.JsonArray(xs) => Some(xs)
         case _ => None
     }
 

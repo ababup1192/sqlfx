@@ -68,6 +68,8 @@ pub enum SqlValue with Eq, Order, ToString {
     case Json(String)              // JSON / JSONB。素の文字列。構造化は層 2
     case Int64Array(List[Int64])   // ANY(:ids) 用。他の配列型は要るときに足す
     case StrArray(List[String])
+    case Int32Array(List[Int32])
+    case JsonArray(List[String])   // JSONB[]。要素は素の JSON 文字列。unnest(:rows) で複数行を 1 文に渡す用
 }
 ```
 

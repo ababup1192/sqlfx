@@ -13,8 +13,16 @@ mod QRender {
     /// 同じ `:name` が 2 回出れば同じ `$n` を 2 回使う。
     /// Pred の slot は `TRUE`、Order の slot は空文字に置く。空文字は `ORDER BY` を .q 側に書かない前提
     /// （design.md §3 の例は `{order}` だけを置き、ORDER BY は断片が持つ）。
+    /// NOT NULL の marker `!`（`::bigint!`）は PG に出せないので落とす。marker を見る QResolve は `toAnnotatedSql`。
     ///
     pub def toSql(queryDef: Query): (String, List[String]) =
+        let (sql, names) = toAnnotatedSql(queryDef);
+        (SqlTokens.dropNotNullMarks(sql), names)
+
+    ///
+    /// `toSql` と同じだが、NOT NULL の marker `!` を残す。列の NULL 可否を決める QResolve だけが使う。
+    ///
+    pub def toAnnotatedSql(queryDef: Query): (String, List[String]) =
         let (parts, names) = List.foldLeft(step(queryDef), (Nil, Nil), queryDef#body);
         (List.reverse(parts) |> List.join(""), List.reverse(names))
 

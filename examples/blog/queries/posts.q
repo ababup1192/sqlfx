@@ -35,3 +35,8 @@ query updatePost(id: Int64) -> exec with changes: Changes[posts] {
 query deletePostsOfUser(userId: Int64) -> exec {
     DELETE FROM posts WHERE user_id = :userId
 }
+
+// max は行が無いと NULL を返す。! で NOT NULL を主張しているので、記事の無い人を渡すと decodeError で落ちる（黙って 0 にはならない）
+query topViewsOfUser(userId: Int64) -> one {
+    SELECT max(views)::bigint! AS top FROM posts WHERE user_id = :userId
+}
