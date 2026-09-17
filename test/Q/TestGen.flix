@@ -5,6 +5,13 @@
 @Test
 def testExampleGeneratedFilesAreUpToDate(): Unit \ {Assert, IO, Fs.DirList.DirList, Fs.FileRead.FileRead} =
     let stale = run {
-        Gen.staleFiles({ migrations = "examples/blog/migrations", queries = "examples/blog/queries", out = "examples/blog/src/Gen", scope = None })
+        Gen.staleFiles({ migrations = "examples/blog/migrations", queries = "examples/blog/queries", out = "examples/blog/src/Gen", scopes = Nil })
     } with Fs.ReadFile.runWithFileRead;
     Assert.assertEq(expected = Ok(Nil), stale)
+
+/// `--scope` の値: `列` は検査だけ、`列:effect` は注入。effect は名前空間付きでもよく、`:` の後ろが空なら検査だけ。
+@Test
+def testScopeSpec(): Unit \ Assert =
+    Assert.assertEq(
+        expected = List#{("project_id", None), ("project_id", Some("Tenant")), ("org_id", Some("Cms.Org")), ("project_id", None)},
+        List.map(spec -> { let scope = scopeSpec(spec); (scope#column, scope#effect) }, List#{"project_id", "project_id:Tenant", "org_id:Cms.Org", "project_id:"}))

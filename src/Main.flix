@@ -1,6 +1,7 @@
 ///
-/// `bin/flix run -- gen [--scope <column>] <migrations/> <queries/> <out/>`: migrations でスキーマを組み、queries の .q から Flix を生成する。
+/// `bin/flix run -- gen [--scope <column>[:<effect>]]... <migrations/> <queries/> <out/>`: migrations でスキーマを組み、queries の .q から Flix を生成する。
 /// `--scope project_id` を付けると、その列を持つ表を触る query に列の条件が無ければ生成を止める（QScope）。
+/// `--scope project_id:Tenant` なら、さらにその列の camelCase の引数（`projectId: Int64`）を生成関数から外し、`Tenant.currentId()` で埋める。
 /// `gen --check ...` は書かずに、生成物が最新かだけを確かめる（CI 用。古ければ終了コード 1）。
 /// `migrate [--check | --status] <migrations/>`: migrations を DB に当てる。接続先は環境変数 SQLFX_DSN / SQLFX_USER / SQLFX_PASSWORD。
 /// `migrate new <migrations/> <name>`: 次の番号でファイルを作る（DB は使わない）。
@@ -25,25 +26,35 @@ def main(): Unit \ {IO, Sys.Env.Env, Sys.Exit.Exit, Fs.DirList.DirList, Fs.FileR
       with Fs.MkDirs.runWithFileWrite
 
 def usage(): Unit \ {IO, Sys.Exit.Exit} =
-    println("usage: bin/flix run -- gen [--check] [--scope <column>] <migrations dir> <queries dir> <out dir>");
+    println("usage: bin/flix run -- gen [--check] [--scope <column>[:<effect>]]... <migrations dir> <queries dir> <out dir>");
     println("       bin/flix run -- migrate [--check | --status] <migrations dir>   (SQLFX_DSN / SQLFX_USER / SQLFX_PASSWORD)");
     println("       bin/flix run -- migrate new <migrations dir> <name>");
     Sys.Exit.exit(2)
 
 ///
-/// `gen` の引数。`--check` と `--scope <column>` はどの順でもよく、残りは 3 つのディレクトリ。
+/// `gen` の引数。`--check` と `--scope <column>[:<effect>]`（繰り返し可）はどの順でもよく、残りは 3 つのディレクトリ。
 ///
 def genArgs(args: List[String]): Option[(Bool, Gen.Dirs)] =
-    def loop(rest, check, scope, dirs) = match rest {
-        case Nil                       => Some((check, scope, List.reverse(dirs)))
-        case "--check" :: more         => loop(more, true, scope, dirs)
-        case "--scope" :: column :: more => loop(more, check, Some(column), dirs)
-        case dir :: more               => loop(more, check, scope, dir :: dirs)
+    def loop(rest, check, scopes, dirs) = match rest {
+        case Nil                       => Some((check, List.reverse(scopes), List.reverse(dirs)))
+        case "--check" :: more         => loop(more, true, scopes, dirs)
+        case "--scope" :: spec :: more => loop(more, check, scopeSpec(spec) :: scopes, dirs)
+        case dir :: more               => loop(more, check, scopes, dir :: dirs)
     };
-    match loop(args, false, None, Nil) {
-        case Some((check, scope, migrationsDir :: queriesDir :: outDir :: Nil)) =>
-            Some((check, { migrations = migrationsDir, queries = queriesDir, out = outDir, scope = scope }))
+    match loop(args, false, Nil, Nil) {
+        case Some((check, scopes, migrationsDir :: queriesDir :: outDir :: Nil)) =>
+            Some((check, { migrations = migrationsDir, queries = queriesDir, out = outDir, scopes = scopes }))
         case _ => None
+    }
+
+///
+/// `project_id` → 検査だけ、`project_id:Tenant` → 検査と注入。effect の名前は `Cms.Tenant` のように名前空間を含んでよい。
+///
+def scopeSpec(spec: String): QScope.Scope =
+    match String.splitOn(substr = ":", spec) {
+        case column :: effect :: Nil if not String.isEmpty(effect) => { column = column, effect = Some(effect) }
+        case column :: _ => { column = column, effect = None }
+        case Nil => { column = spec, effect = None }
     }
 
 mod MigrateCli {
@@ -128,9 +139,9 @@ mod Gen {
     /// - `migrations`: DDL の場所
     /// - `queries`: .q の場所
     /// - `out`: 生成物を書く場所
-    /// - `scope`: テナントの列名。あれば QScope の検査を通す
+    /// - `scopes`: テナントの列（と effect）。あれば QScope の検査と注入を通す
     ///
-    pub type alias Dirs = { migrations = String, queries = String, out = String, scope = Option[String] }
+    pub type alias Dirs = { migrations = String, queries = String, out = String, scopes = List[QScope.Scope] }
 
     ///
     /// 生成の本体。失敗は 1 つ目を表示して終了コード 1。
@@ -188,7 +199,7 @@ mod Gen {
             sqlFiles <- listFiles(dirs#migrations, ".sql");
             schema <- buildSchema(sqlFiles);
             qFiles <- listFiles(dirs#queries, ".q");
-            queryFiles <- Result.traverse(path -> renderOne(schema, dirs#scope, path, dirs#out), qFiles);
+            queryFiles <- Result.traverse(path -> renderOne(schema, dirs#scopes, path, dirs#out), qFiles);
             tables <- Codegen.renderTables(schema) |> Result.mapErr(error -> "Tables.flix: ${error}")
         ) yield ("${dirs#out}/Tables.flix", tables) :: queryFiles
 
@@ -209,18 +220,15 @@ mod Gen {
     ///
     /// 1 つの .q → 1 つの .flix（出力先のパスと中身）。QLint の注意書きは表示するだけで、生成は止めない。
     ///
-    def renderOne(schema: Schema.Schema, scope: Option[String], path: String, outDir: String): Result[String, (String, String)] \ {IO, Fs.ReadFile.ReadFile} =
+    def renderOne(schema: Schema.Schema, scopes: List[QScope.Scope], path: String, outDir: String): Result[String, (String, String)] \ {IO, Fs.ReadFile.ReadFile} =
         let fileName = String.splitOn(substr = "/", path) |> List.last |> Option.getWithDefault(path);
         forM (
             source <- readFile(path);
             queries <- QParser.parseFile(source) |> Result.mapErr(e -> "${path}: ${e}");
             _ <- Ok(List.forEach(warning -> println("warning: ${path}: ${warning}"), QLint.warnings(queries)));
-            _ <- match scope {
-                case Some(column) => QScope.check(column, schema, source, queries) |> Result.mapErr(e -> "${path}: ${QScope.describe(e)}")
-                case None         => Ok(())
-            };
+            injections <- QScope.plan(scopes, schema, source, queries) |> Result.mapErr(e -> "${path}: ${QScope.describe(e)}");
             resolved <- Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(e -> "${path}: ${e}");
-            code <- Codegen.renderQueries({ fileName = fileName, source = source }, resolved) |> Result.mapErr(e -> "${path}: ${e}")
+            code <- Codegen.renderQueriesWith({ fileName = fileName, source = source }, injections, resolved) |> Result.mapErr(e -> "${path}: ${e}")
         ) yield ("${outDir}/${Codegen.moduleNameOf(fileName)}.flix", code)
 
     ///

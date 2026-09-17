@@ -65,7 +65,7 @@ pub def findUser(id: Int64): Option[FindUserRow] \ {SqlRead, DbErr} = ...
 pub def insertUser(name: String): Option[InsertUserRow] \ {SqlWrite, DbErr} = ...   // INSERT ... RETURNING id
 pub def searchUsers(limit: Int64, filter: Fragment.Pred[UsersTable.UsersTable], order: Fragment.Order[UsersTable.UsersTable]): List[SearchUsersRow] \ {SqlRead, DbErr}
 pub def renameUser(id: Int64, name: String): Int32 \ SqlWrite
-pub def sourceHash(): Int32   // .q の中身のハッシュ。テストで現物と照合する
+pub def sourceHash(): Int32   // .q の中身のハッシュ。gen --check が生成物ごと現物と照合する
 ```
 
 - ファイル `users.q` → `mod UsersQueries`、テーブル `users` → `mod UsersTable`（印の enum と列の `Col`）

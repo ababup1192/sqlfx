@@ -192,3 +192,56 @@ def testConstraintCase(): Unit \ Assert =
          Codegen.constraintCase("users", "email_key"),
          Codegen.constraintCase("users", "users_1_check"),
          Codegen.renderTables(Schema.addTable(table(List#{"users_email_key", "email_key"}), Schema.empty())) |> Result.map(_ -> ())))
+
+/// 注入する引数は署名から外れ、本文の先頭で effect から束ね、関数の effect に足される。
+/// 残る引数の数でレコードか単独か引数無しかが決まる。slot 付きなら params0 の前に束ねる。
+///
+///   two(projectId, id, title) → record（id, title）/ one(projectId, id) → 単独（id）/ zero(projectId) → 引数無し / withSlot(projectId) + Pred
+@Test
+def testRenderInjectedParams(): Unit \ Assert =
+    let source = "query two(projectId: Int64, id: Int64, title: String) -> exec { UPDATE entries SET title = :title WHERE id = :id AND project_id = :projectId }\n"
+        + "query one(projectId: Int64, id: Int64) -> one { SELECT id FROM entries WHERE id = :id AND project_id = :projectId }\n"
+        + "query zero(projectId: Int64) -> many { SELECT id FROM entries WHERE project_id = :projectId }\n"
+        + "query withSlot(projectId: Int64) -> many with f: Pred[entries] { SELECT id FROM entries WHERE project_id = :projectId AND {f} }";
+    let schema = DdlParser.apply("CREATE TABLE entries (id BIGINT PRIMARY KEY, project_id BIGINT NOT NULL, title TEXT NOT NULL)", Schema.empty()) |> Result.map(fst) |> Result.getWithDefault(Schema.empty());
+    let injection = { param = "projectId", effect = "Tenant" };
+    let injections = Map#{"two" => List#{injection}, "one" => List#{injection}, "zero" => List#{injection}, "withSlot" => List#{injection}};
+    let body = QParser.parseFile(source)
+        |> Result.mapErr(ToString.toString)
+        |> Result.flatMap(queries -> Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(ToString.toString))
+        |> Result.flatMap(resolved -> Codegen.renderQueriesWith({ fileName = "entries.q", source = source }, injections, resolved) |> Result.mapErr(ToString.toString))
+        |> Result.map(code -> String.splitOn(substr = "\n", code) |> List.filter(line -> (String.startsWith(prefix = "    pub def ", line) and not String.contains(substr = "sourceHash", line)) or String.startsWith(prefix = "        let p", line)));
+    Assert.assertEq(expected = Ok(List#{
+        "    pub def two(args: { id = Int64, title = String }): Int32 \\ DbWrite + Tenant =",
+        "        let projectId = Tenant.currentId();",
+        "        let params = List#{SqlValue.Str(args#title), SqlValue.Int64(args#id), SqlValue.Int64(projectId)};",
+        "    pub def one(id: Int64): Option[OneRow] \\ DbRead + Tenant =",
+        "        let projectId = Tenant.currentId();",
+        "        let params = List#{SqlValue.Int64(id), SqlValue.Int64(projectId)};",
+        "    pub def zero(): List[ZeroRow] \\ DbRead + Tenant =",
+        "        let projectId = Tenant.currentId();",
+        "        let params = List#{SqlValue.Int64(projectId)};",
+        "    pub def withSlot(f: Fragment.Pred[EntriesTable.EntriesTable]): List[WithSlotRow] \\ DbRead + Tenant =",
+        "        let projectId = Tenant.currentId();",
+        "        let params0 = List#{SqlValue.Int64(projectId)};",
+        "        let params = params1;"
+    }), body)
+
+/// 2 つの scope の注入は宣言の順に束ね、effect も同じ順で並ぶ。effect の名前は名前空間付き（`Cms.Tenant`）でもそのまま埋まる。
+@Test
+def testRenderTwoInjections(): Unit \ Assert =
+    let source = "query team(orgId: Int64, projectId: Int64) -> many { SELECT id FROM teams WHERE project_id = :projectId AND org_id = :orgId }";
+    let schema = DdlParser.apply("CREATE TABLE teams (id BIGINT PRIMARY KEY, project_id BIGINT NOT NULL, org_id BIGINT NOT NULL)", Schema.empty()) |> Result.map(fst) |> Result.getWithDefault(Schema.empty());
+    let injections = Map#{"team" => List#{{ param = "projectId", effect = "Cms.Tenant" }, { param = "orgId", effect = "Org" }}};
+    let body = QParser.parseFile(source)
+        |> Result.mapErr(ToString.toString)
+        |> Result.flatMap(queries -> Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(ToString.toString))
+        |> Result.flatMap(resolved -> Codegen.renderQueriesWith({ fileName = "teams.q", source = source }, injections, resolved) |> Result.mapErr(ToString.toString))
+        |> Result.map(code -> String.splitOn(substr = "\n", code) |> List.filter(line -> (String.startsWith(prefix = "    pub def ", line) and not String.contains(substr = "sourceHash", line)) or String.startsWith(prefix = "        let ", line)));
+    Assert.assertEq(expected = Ok(List#{
+        "    pub def team(): List[TeamRow] \\ DbRead + Cms.Tenant + Org =",
+        "        let projectId = Cms.Tenant.currentId();",
+        "        let orgId = Org.currentId();",
+        "        let sql = \"SELECT id FROM teams WHERE project_id = $1 AND org_id = $2\";",
+        "        let params = List#{SqlValue.Int64(projectId), SqlValue.Int64(orgId)};"
+    }), body)

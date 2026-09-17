@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.4.4"
+"github:ababup1192/sqlfx" = "0.4.5"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -84,6 +84,32 @@ migrations の DDL から机上のスキーマを組み、`.q` の SELECT を当
 テーブルや列が無ければ生成時に止まる。生成物には `.q` のハッシュが入り、`gen --check` で「生成し忘れ」を検知できる。
 `gen --scope project_id` を付けると、`project_id` 列を持つ表を触る query に列の名前が無ければ生成を止める（マルチテナントの書き忘れ）。
 意図して跨ぐ query は前の行に `// unscoped: 理由` と書く（印と `query` の間に `//` コメントと空行を挟んでよい。query が続かない印は生成を止める）。
+
+`gen --scope project_id:Tenant` のように effect の名前を添えると、検査に加えて、その列の値を生成関数の引数から外して effect から取る。
+呼ぶ側が毎回 `projectId = Tenant.currentId()` を渡す代わりに、生成関数の中で `let projectId = Tenant.currentId();` が走り、関数の effect に `+ Tenant` が付く
+（`Tenant` は利用側が `pub eff Tenant { def current(): ... }` と `Tenant.currentId(): Int64 \ Tenant` を持つ想定。名前空間付きの `Cms.Tenant` も書ける）。
+これで「別のテナントの id を渡す」呼び出しが、印を付けた query 以外では書けなくなる。
+
+- 外すのは、名前が列の camelCase（`project_id` → `projectId`）で、型が必須の `Int64` で、query が触る表にその列がある引数だけ。
+  別名の引数や `project_id IN (...)` のような書き方は今まで通り呼ぶ側が渡す
+- 名前だけ合って型が違う（`String` / `Option[Int64]` / `Int32`）引数は `UninjectableParam` で生成が止まる
+- 検査は受けるが引数は残したい query（ログインの途中など Tenant を持たない文脈から呼ぶ物）は、前の行に `// scope: explicit 理由`
+- `--scope` は繰り返せる（`--scope project_id:Tenant --scope org_id:Org`）。列ごとに独立に判定し、両方の列を持つ表を触る query には effect が両方付く
+- `// unscoped:` / `// scope: explicit` は理由の前に列を書くとその列だけに効く（`// unscoped: org_id 組織を跨ぐ`）。省けば `--scope` の全部の列に効く。
+  スキーマの列の名前で理由を書き始めると（`// unscoped: title で引く`）列と読まれて `MarkerColumnNotScoped` で止まるので、その時は列を先に書く
+- 引数を外した結果、残りが 1 つなら単独の引数、0 なら引数無しの関数になる（2 つ以上ならレコード。§2 の規則のまま）
+
+```
+// scope: explicit ログインの途中で Tenant が無い
+query findMembership(projectId: Int64, userId: Int64) -> one { ... WHERE project_id = :projectId AND user_id = :userId }
+
+query listEntries(projectId: Int64, limit: Int64) -> many { SELECT ... FROM entries WHERE project_id = :projectId LIMIT :limit }
+```
+
+```flix
+pub def findMembership(args: { projectId = Int64, userId = Int64 }): Option[FindMembershipRow] \ DbRead
+pub def listEntries(limit: Int64): List[ListEntriesRow] \ DbRead + Tenant   // 中で let projectId = Tenant.currentId();
+```
 
 ```bash
 make gen         # 生成する
@@ -580,6 +606,21 @@ HikariCP はどちらでも同じ "request timed out" の文言を出すので�
 |---|---|
 | `DbErr.runWithResult` が返す `Result[String, _]` | `Result[DbErrorKind, _]`（文言は `DbError.describe(kind)`） |
 | thunk の中で handler を張った内側の try/catch を自前で書く | `Db.guard(thunk)`（上の「触ってはいけない形」） |
+
+### 0.4.4 からの移行
+
+`gen --scope project_id` だけなら生成物は変わらない。effect を添えた時だけ形が変わる。
+
+| 0.4.4 | 0.4.5 |
+|---|---|
+| `gen --scope <列>`（1 つだけ） | `gen --scope <列>[:<effect>]`（繰り返し可）。`:<effect>` を省けば今まで通り検査だけ |
+| 生成関数は `projectId: Int64` を引数で受け、呼ぶ側が `Tenant.currentId()` を渡す | `--scope project_id:Tenant` なら引数から外れ、関数の中で `Tenant.currentId()` を呼ぶ。署名は `\ DbRead + Tenant` |
+| 引数が `args` のレコードだった query | `projectId` を外して残りが 1 つなら単独の引数、0 なら引数無しに変わる（呼ぶ側の書き換えが要る） |
+| Tenant を持たない文脈から呼ぶ query の逃げ道が無い | `// scope: explicit 理由` で引数を残す（検査は受ける） |
+| `// unscoped: 理由` は全部の列に効く | `// unscoped: <列> 理由` でその列だけに効く（省けば全部）。`// scope: explicit` も同じ |
+| `Gen.Dirs` の `scope = Option[String]` | `scopes = List[QScope.Scope]`（`{ column = String, effect = Option[String] }`） |
+| `QScope.check(column, …)` | 残る（検査だけ）。注入の一覧は `QScope.plan(scopes, …)`、生成は `Codegen.renderQueriesWith(origin, injections, resolved)` |
+| `ScopeError` は 3 case | `MarkerColumnNotScoped(query, 列)` と `UninjectableParam(query, 引数, 列, 受け取った型)` が増えた |
 
 ### 0.4.3 からの移行
 
