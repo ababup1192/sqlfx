@@ -216,7 +216,7 @@ mod Gen {
             queries <- QParser.parseFile(source) |> Result.mapErr(e -> "${path}: ${e}");
             _ <- Ok(List.forEach(warning -> println("warning: ${path}: ${warning}"), QLint.warnings(queries)));
             _ <- match scope {
-                case Some(column) => QScope.check(column, schema, source, queries) |> Result.mapErr(e -> "${path}: ${e}（テナントの列の条件が無い query。意図した物なら直前の行に `// unscoped: 理由` を書く）")
+                case Some(column) => QScope.check(column, schema, source, queries) |> Result.mapErr(e -> "${path}: ${QScope.describe(e)}")
                 case None         => Ok(())
             };
             resolved <- Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(e -> "${path}: ${e}");

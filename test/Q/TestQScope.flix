@@ -35,12 +35,44 @@ def testScopeRejectsMissingColumn(): Unit \ Assert =
             + "query b(id: Int64) -> one { SELECT id FROM entries WHERE id = :id }\n"
             + "query c(id: Int64) -> exec { DELETE FROM entries WHERE id = :id }"))
 
-/// `// unscoped: 理由` を直前に書いた query は通る。印は直後の query にだけ効く。
+// ---- `// unscoped:` の印 ----
+
+def byHash(): String = "query byHash(h: String) -> one { SELECT id FROM entries WHERE title = :h }\n"
+def other(): String = "query other(id: Int64) -> one { SELECT id FROM entries WHERE id = :id }"
+
+/// 印が効く並び（直後 / コメント 1 行を挟む / 空行を挟む）では byHash が免除され、印の無い other だけが止まる。
+/// 印は直後の query にだけ効き、その後のコメントで次の query には及ばない。
 @Test
-def testScopeUnscopedMarker(): Unit \ Assert =
-    let source =
-        "// unscoped: hash で引いてから呼ぶ側が照合する\n"
-            + "query byHash(h: String) -> one { SELECT id, project_id FROM entries WHERE title = :h }\n"
-            + "// 普通のコメント\n"
-            + "query other(id: Int64) -> one { SELECT id FROM entries WHERE id = :id }";
-    Assert.assertEq(expected = (List#{"byHash"}, Err("Unscoped(other, entries, project_id)")), (QScope.unscopedNames(source), checkSource(source)))
+def testScopeMarkerReachesNextQuery(): Unit \ Assert =
+    let cases = List#{
+        ("// unscoped: hash で引く\n" + byHash() + "// 普通のコメント\n" + other(),
+            (Ok(List#{"byHash"}), Err("Unscoped(other, entries, project_id)"))),
+        ("// unscoped: hash で引く\n// 呼ぶ側が照合する\n" + byHash() + other(),
+            (Ok(List#{"byHash"}), Err("Unscoped(other, entries, project_id)"))),
+        ("// unscoped: hash で引く\n\n" + byHash() + other(),
+            (Ok(List#{"byHash"}), Err("Unscoped(other, entries, project_id)")))
+    };
+    Assert.assertEq(
+        expected = List.map(snd, cases),
+        List.map(match (source, _) -> (QScope.markedNames(prefix = "// unscoped:", source), checkSource(source)), cases))
+
+/// 印の後に query が来ない（別の行 / ファイル末尾 / 印の重なり）と、印の行番号を持つ DanglingMarker で止まる。
+@Test
+def testScopeMarkerDangling(): Unit \ Assert =
+    let cases = List#{
+        ("// unscoped: 理由\nfragment x { id }\n" + byHash(), Err(ScopeError.DanglingMarker(1))),
+        (byHash() + "// unscoped: 理由\n", Err(ScopeError.DanglingMarker(2))),
+        ("// unscoped: 理由\n// unscoped: 理由 2\n" + byHash(), Err(ScopeError.DanglingMarker(1)))
+    };
+    Assert.assertEq(
+        expected = List.map(snd, cases),
+        List.map(match (source, _) -> QScope.markedNames(prefix = "// unscoped:", source), cases))
+
+/// 印が指す名前が query の一覧に無ければ UnknownMarkedQuery で止まる（印の名前と query の名前の食い違い）。
+@Test
+def testScopeMarkerUnknownQuery(): Unit \ Assert =
+    let marked = "// unscoped: 理由\nquery byHsh(h: String) -> one { SELECT id FROM entries WHERE title = :h }";
+    let queries = QParser.parseFile(byHash()) |> Result.getWithDefault(Nil);
+    Assert.assertEq(
+        expected = Err(ScopeError.UnknownMarkedQuery("byHsh")),
+        QScope.check("project_id", tenantSchema(), marked, queries))

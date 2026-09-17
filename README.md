@@ -55,7 +55,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 
 ```toml
 [dependencies]
-"github:ababup1192/sqlfx" = "0.4.3"
+"github:ababup1192/sqlfx" = "0.4.4"
 
 [mvn-dependencies]
 "org.postgresql:postgresql" = "42.7.4"
@@ -83,7 +83,7 @@ make test-pg     # docker compose で PostgreSQL 16 を立て、全部回して�
 migrations の DDL から机上のスキーマを組み、`.q` の SELECT を当てて結果の列の名前・型・NULL 可否を決める。
 テーブルや列が無ければ生成時に止まる。生成物には `.q` のハッシュが入り、`gen --check` で「生成し忘れ」を検知できる。
 `gen --scope project_id` を付けると、`project_id` 列を持つ表を触る query に列の名前が無ければ生成を止める（マルチテナントの書き忘れ）。
-意図して跨ぐ query は直前の行に `// unscoped: 理由` と書く。
+意図して跨ぐ query は前の行に `// unscoped: 理由` と書く（印と `query` の間に `//` コメントと空行を挟んでよい。query が続かない印は生成を止める）。
 
 ```bash
 make gen         # 生成する
@@ -580,6 +580,13 @@ HikariCP はどちらでも同じ "request timed out" の文言を出すので�
 |---|---|
 | `DbErr.runWithResult` が返す `Result[String, _]` | `Result[DbErrorKind, _]`（文言は `DbError.describe(kind)`） |
 | thunk の中で handler を張った内側の try/catch を自前で書く | `Db.guard(thunk)`（上の「触ってはいけない形」） |
+
+### 0.4.3 からの移行
+
+| 0.4.3 | 0.4.4 |
+|---|---|
+| `// unscoped:` と `query` の間に `//` コメントが挟まると印が黙って無効（検査に掛かる query だけ落ちる） | 間の `//` コメントと空行は読み飛ばす。印の後に query が来ない（別の行・ファイル末尾・印の重なり）と `DanglingMarker(行番号)` で生成が止まる |
+| `QScope.unscopedNames(source)` | `QScope.markedNames(prefix = "// unscoped:", source)`（`Result` を返す） |
 
 ### 0.4.2 からの移行
 
