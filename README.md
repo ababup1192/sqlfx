@@ -46,7 +46,7 @@ Where that runs is decided by the handler you wrap around it, at one place in th
 ```flix
 Pool.withConnection(pool, _ -> greet(1i64))          // production: a real PostgreSQL
 DbTest.runWithRows(rows, () -> greet(1i64))          // a unit test: the rows you decided
-DbTest.runRecording(rows, 0, () -> greet(1i64))      // a unit test: (the value, the SQL that was issued)
+DbTest.runRecording(rows, 0, () -> greet(1i64))      // a unit test: returns (a, List[Statement])
 ```
 
 | | |
@@ -316,9 +316,9 @@ def findUserByEmail(email: String): Option[User] \ DbRead + RawSql =
 | Function | Returns | Effects |
 |---|---|---|
 | `Sql.fetch` / `fetchOne` | `List[Row]` / `Option[Row]` | `DbRead + RawSql` |
-| `Sql.fetchAs` / `fetchOneAs` | the decoded value | `DbRead + RawSql` |
+| `Sql.fetchAs` / `fetchOneAs` | `List[a]` / `Option[a]`, through a `Decoder[a]` | `DbRead + RawSql` |
 | `Sql.execute` | rows affected, `Int32` | `DbWrite + RawSql` |
-| `Sql.executeReturningAs` / `executeReturningOneAs` | the RETURNING rows, decoded | `DbWrite + RawSql` |
+| `Sql.executeReturningAs` / `executeReturningOneAs` | `List[a]` / `Option[a]` from RETURNING | `DbWrite + RawSql` |
 
 A failed decode raises `DbErr.decodeError`. There are four ways to fail — no such column, wrong
 type, NULL in a column the decoder says is not nullable, and text that is not JSON — and none of
@@ -1145,7 +1145,7 @@ def greet(id: Int64): String \ DbRead =
 ```flix
 Pool.withConnection(pool, _ -> greet(1i64))          // 本番。実 PostgreSQL へ
 DbTest.runWithRows(rows, () -> greet(1i64))          // 単体。決めた行を返す
-DbTest.runRecording(rows, 0, () -> greet(1i64))      // 単体。(値, 発行した SQL) が返る
+DbTest.runRecording(rows, 0, () -> greet(1i64))      // 単体。(a, List[Statement]) が返る
 ```
 
 | | |
@@ -1404,9 +1404,9 @@ def findUserByEmail(email: String): Option[User] \ DbRead + RawSql =
 | 関数 | 返す物 | エフェクト |
 |---|---|---|
 | `Sql.fetch` / `fetchOne` | `List[Row]` / `Option[Row]` | `DbRead + RawSql` |
-| `Sql.fetchAs` / `fetchOneAs` | デコードした値 | `DbRead + RawSql` |
+| `Sql.fetchAs` / `fetchOneAs` | `Decoder[a]` を通した `List[a]` / `Option[a]` | `DbRead + RawSql` |
 | `Sql.execute` | 影響行数 `Int32` | `DbWrite + RawSql` |
-| `Sql.executeReturningAs` / `executeReturningOneAs` | RETURNING の行をデコードした値 | `DbWrite + RawSql` |
+| `Sql.executeReturningAs` / `executeReturningOneAs` | RETURNING の `List[a]` / `Option[a]` | `DbWrite + RawSql` |
 
 デコードに失敗すると `DbErr.decodeError` が上がる。列が無い、型が違う、NULL 不可の列が NULL、
 JSON として読めない、の 4 種類で、どれも静かに壊れない。
