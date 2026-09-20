@@ -1,13 +1,26 @@
-use SqlValue.SqlValue
-use DbError.DbFailure
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.DbError.DbFailure
 
 // 実 PG のテストで共有する部品: 接続設定、migrations の適用、接続の開閉。
 
 mod BlogTestSupport {
 
+    use Sqlfx.Db
+    use Sqlfx.DbErr
+    use Sqlfx.DbError
+    use Sqlfx.DbRead
+    use Sqlfx.DbWrite
+    use Sqlfx.Jdbc
+    use Sqlfx.Migrate
+    use Sqlfx.RawSql
+    use Sqlfx.Sql
+    use Sqlfx.SqlRead
+    use Sqlfx.SqlWrite
+    use Sqlfx.TransientDbErr
+
     import java.sql.Connection
 
-    use DbError.DbFailure
+    use Sqlfx.DbError.DbFailure
 
     ///
     /// 接続設定。SQLFX_TEST_DSN が無ければ即 panic。

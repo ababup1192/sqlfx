@@ -1,5 +1,10 @@
-use DbError.DbErrorKind
-use DbError.Failure
+use Sqlfx.DbError
+use Sqlfx.Decoder
+use Sqlfx.Sql
+use Sqlfx.Tx
+
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
 
 // 生 SQL 版（BlogRaw）を実 PostgreSQL で通しで動かす。生成コード版と同じ筋書き。
 

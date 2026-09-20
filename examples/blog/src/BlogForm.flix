@@ -4,6 +4,8 @@
 ///
 mod BlogForm {
 
+    use Sqlfx.DbWrite
+
     use Blog.NewUser
     use Blog.RegisterErr
 

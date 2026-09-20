@@ -1,7 +1,12 @@
-use SqlValue.SqlValue
+use Sqlfx.DbError
+use Sqlfx.DbTest
+use Sqlfx.Row
+use Sqlfx.SqlValue
+
+use Sqlfx.SqlValue.SqlValue
 use Blog.RegisterFailure
 use BlogForm.FormError
-use DbError.DbErrorKind
+use Sqlfx.DbError.DbErrorKind
 
 // 生成コード（.q → UsersQueries / PostsQueries）を使うユースケースを DB 無しで: preload のクエリ数と束ね方、DB エラーの業務エラーへの変換。
 

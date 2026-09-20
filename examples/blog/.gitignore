@@ -1,4 +1,5 @@
 build/
 lib/
 artifact/
-src/sqlfx/
+src/Sqlfx/
+src/Sqlfx.flix

@@ -1,6 +1,11 @@
-use Fragment.{===}
-use DbError.DbFailure
-use DbError.DbErrorKind
+use Sqlfx.DbError
+use Sqlfx.Fragment
+use Sqlfx.Sql
+use Sqlfx.Tx
+
+use Sqlfx.Fragment.{===}
+use Sqlfx.DbError.DbFailure
+use Sqlfx.DbError.DbErrorKind
 use Blog.RegisterFailure
 
 // Blog のユースケース（生成コード版）を実 PostgreSQL で通しで動かす。クエリ単体は TestQueriesPg。

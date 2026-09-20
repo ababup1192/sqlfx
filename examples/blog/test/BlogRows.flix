@@ -1,11 +1,14 @@
-use SqlValue.SqlValue
+use Sqlfx.SqlValue.SqlValue
 
 ///
 /// DB 無しテストで使う users / posts の行。生成版と生 SQL 版のテストが共有する（デコーダは余分な列を無視する）。
 ///
 mod BlogRows {
 
-    use Row.Row
+    use Sqlfx.Row
+    use Sqlfx.SqlValue
+
+    use Sqlfx.Row.Row
 
     ///
     /// users の 1 人。role は member 固定。

@@ -1,6 +1,10 @@
-use Fragment.{===, >>=}
-use DbError.DbFailure
-use DbError.DbErrorKind
+use Sqlfx.DbError
+use Sqlfx.Fragment
+use Sqlfx.Timestamp
+
+use Sqlfx.Fragment.{===, >>=}
+use Sqlfx.DbError.DbFailure
+use Sqlfx.DbError.DbErrorKind
 
 // 生成した各クエリを、決まったテストデータ（BlogTestSupport.seed）に対して実行し、返る行を丸ごと期待値と比べる。
 // 1 テスト 1 クエリ。テーブル 1 つの物、JOIN した物、断片で絞った物、書き込み後の状態、の順。期待値は Views で名前付きに作る。

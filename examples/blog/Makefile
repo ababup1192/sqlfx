@@ -4,9 +4,10 @@ FLIX = ../../bin/flix
 COMPOSE = docker compose -f ../../docker-compose.yml
 PG_ENV = SQLFX_TEST_DSN=jdbc:postgresql://127.0.0.1:5432/sqlfx SQLFX_TEST_USER=flix SQLFX_TEST_PASSWORD=flix
 
-# sqlfx 本体を src/sqlfx/ に写す（flix.toml がローカル依存を指せないため）
+# sqlfx 本体を src/Sqlfx.flix と src/Sqlfx/ に写す（flix.toml がローカル依存を指せないため）。
+# WhyNot: 別の場所に置き換えないのは、Flix がモジュール Sqlfx.X をファイル Sqlfx/X.flix にしか置かせないため。
 vendor:
-	rm -rf src/sqlfx && mkdir -p src/sqlfx && cp -R ../../src/Db ../../src/Q ../../src/Time ../../src/Uuid src/sqlfx/
+	rm -rf src/Sqlfx src/Sqlfx.flix && cp ../../src/Sqlfx.flix src/ && cp -R ../../src/Sqlfx src/
 
 # migrations と queries/*.q から src/Gen/ を作り直す（生成器は本体の main）
 gen:
