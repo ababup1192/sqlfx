@@ -1,6 +1,6 @@
 [package]
 name        = "sqlfx"
-description = "Flix の PostgreSQL 向け DB ライブラリ。SQL を抽象せず、クエリの間にエフェクトで型を付ける"
+description = "A PostgreSQL database library for Flix. It does not abstract SQL away; it types what happens between queries with effects"
 version     = "0.4.6"
 flix        = "0.75.3"
 authors     = ["abab <ababup1192@gmail.com>"]

@@ -15,7 +15,7 @@ case "$real" in
 esac
 
 if [ -z "$FLIX_JAR" ]; then
-    echo "flix.jar が見つかりません。FLIX_JAR=/path/to/flix.jar を渡すか、$ENGINE_ROOT で devbox の profile を作ってください。" >&2
+    echo "flix.jar not found. Pass FLIX_JAR=/path/to/flix.jar, or build the devbox profile in $ENGINE_ROOT." >&2
     exit 127
 fi
 
@@ -24,7 +24,7 @@ if ! java -version >/dev/null 2>&1; then
     JAVA_CMD="$ENGINE_ROOT/.devbox/nix/profile/default/bin/java"
 fi
 if ! "$JAVA_CMD" -version >/dev/null 2>&1; then
-    echo "java が見つかりません。PATH に JDK を通してください。" >&2
+    echo "java not found. Put a JDK on your PATH." >&2
     exit 127
 fi
 

@@ -136,7 +136,7 @@ mod Fragment {
     ///
     def column(col: Col[row, a, n]): (String, a -> SqlValue) with IsColumn[n] = match col {
         case Col.Col(name, toSql) => (name, toSql)
-        case Col.Value(_) => bug!("Fragment: IsColumn の付いた項が値だった")
+        case Col.Value(_) => bug!("Fragment: a term marked IsColumn held a value")
     }
 
     def colName(col: Col[row, a, n]): String with IsColumn[n] = fst(column(col))

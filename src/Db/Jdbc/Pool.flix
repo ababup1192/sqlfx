@@ -288,7 +288,7 @@ mod Pool {
         match withLazyTxResultAfterBegin(pool, onBegin, () -> Ok(thunk())) {
             case Ok(value) => value
             // WhyNot: この腕を書くのは、e が型変数のままで match が網羅を求めるため。Err は上の `Ok(...)` からは作られない
-            case Err(_)    => bug!("withLazyTxAfterBegin: Err は作られない")
+            case Err(_)    => bug!("withLazyTxAfterBegin: Err is never produced")
         }
 
     ///

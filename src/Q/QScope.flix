@@ -53,15 +53,15 @@ mod QScope {
     ///
     pub def describe(error: ScopeError): String = match error {
         case ScopeError.Unscoped(name, table, column) =>
-            "query ${name} が ${table} を触るのに ${column} の条件が無い。意図した物なら前の行に `// unscoped: 理由` を書く"
+            "query ${name} touches ${table} with no condition on ${column}. If that is intended, write `// unscoped: <reason>` on the line before the query"
         case ScopeError.DanglingMarker(at) =>
-            "${at} 行目の印（`// unscoped:` / `// scope: explicit`）の後に query が無い。印は query の前に置き、間に挟んでよいのは `//` コメントと空行だけ"
+            "the marker on line ${at} (`// unscoped:` / `// scope: explicit`) is not followed by a query. Put the marker before the query; only `//` comments and blank lines may come between"
         case ScopeError.UnknownMarkedQuery(name) =>
-            "印が指す query ${name} がこのファイルに無い。名前を query の物と揃える"
+            "the marker points at query ${name}, which is not in this file. Match the name to the query's"
         case ScopeError.MarkerColumnNotScoped(name, column) =>
-            "query ${name} の印に書いた列 ${column} は `--scope` に無い。列を書くなら `--scope` の物にし、理由が列名で始まるなら列を先に書く"
+            "column ${column} in the marker of query ${name} is not in `--scope`. If you name a column, it must be one of `--scope`; if the reason itself starts with a column name, put the column first"
         case ScopeError.UninjectableParam(name, param, column, received) =>
-            "query ${name} の引数 ${param} は ${column} の値として effect から埋める名前だが、型が ${received}。必須の Int64 にするか、名前を変えるか、手で渡すなら前の行に `// scope: explicit ${column} 理由` を書く"
+            "parameter ${param} of query ${name} has the name that is filled from the effect as the value of ${column}, but its type is ${received}. Make it a required Int64, rename it, or, to pass it by hand, write `// scope: explicit ${column} <reason>` on the line before the query"
     }
 
     ///

@@ -20,7 +20,7 @@ mod Codegen {
     ///
     /// 生成器のバージョン。出力の形が変わったら上げる。生成物に埋めて照合する。
     ///
-    pub def version(): String = "8"
+    pub def version(): String = "9"
 
     pub enum CodegenError with Eq, Order, ToString {
         /// (クエリ名, 列名) 結果に同じ列名が 2 つある。AS で名前を変える
@@ -75,7 +75,7 @@ mod Codegen {
                     "    use Decoder.Decoder",
                     "",
                     "    ///",
-                    "    /// 生成元 ${fileName} のハッシュ。`gen --check` が .q の現物と照合する。",
+                    "    /// Hash of the source ${fileName}. `gen --check` compares it with the .q on disk.",
                     "    ///",
                     "    pub def sourceHash(): Int32 = ${sourceHash(source)}",
                     "",
@@ -126,7 +126,7 @@ mod Codegen {
         let fields = resolved#columns |> List.map(column -> "${fieldName(column#name)} = ${columnFlixType(column)}") |> List.join(", ");
         List.join("\n", List#{
             "    ///",
-            "    /// ${resolved#queryDef#name} の 1 行。",
+            "    /// One row of ${resolved#queryDef#name}.",
             "    ///",
             "    pub type alias ${rowTypeName(resolved#queryDef)} = { ${fields} }",
             ""
@@ -194,7 +194,7 @@ mod Codegen {
             "    ///",
             "    /// ${queryDef#name}: ${oneLine(sqlTemplate)}"},
             List.append(
-                List.map(injection -> "    /// ${injection#param} は ${injection#effect}.currentId() から取る（引数に無い）。", injections),
+                List.map(injection -> "    /// ${injection#param} comes from ${injection#effect}.currentId() (it is not a parameter).", injections),
                 List#{"    ///"})));
         let header = "    pub def ${queryDef#name}(${signature}): ${resultType} \\ ${effects} =";
         let injectionLets = List.map(injection -> "        let ${injection#param} = ${injection#effect}.currentId();", injections);
@@ -332,7 +332,7 @@ mod Codegen {
                 "    pub def ${fieldName(column#name)}(): Fragment.Col[${moduleName}, ${SqlType.toFlixType(sqlType)}, ${nullabilityMarker(column#nullable)}] = Fragment.Col.Col(${flixString(column#name)}, ${SqlType.wrapFunction(sqlType)})"));
         renderConstraints(table) |> Result.map(constraints -> List.join("\n", List#{
             "///",
-            "/// ${table#name} テーブル。enum は断片 DSL の型に付ける印、関数は列。",
+            "/// Table ${table#name}. The enum is the tag the fragment DSL puts on the type; the functions are the columns.",
             "///",
             "mod ${moduleName} {",
             "",
@@ -366,22 +366,22 @@ mod Codegen {
                 List.join("\n", List#{
                     "",
                     "    ///",
-                    "    /// DDL の名前付き制約。違反の翻訳は `onConstraint` に渡す関数で書く。case が足りなければコンパイルエラー。",
+                    "    /// Named constraints from the DDL. Translate violations in the function passed to `onConstraint`; a missing case is a compile error.",
                     "    ///",
                     "    pub enum Constraint with Eq, Order, ToString {",
                     List.join("\n", cases),
                     "    }",
                     "",
                     "    ///",
-                    "    /// このテーブルへの書き込みを、制約違反を `translate` で翻訳しながら実行する。",
-                    "    /// translate は thunk と同じ型の値を返すか、業務エラーのエフェクトを投げる。翻訳しない case は `raiseConstraint`。",
-                    "    /// enum に無い名前の違反と、制約違反以外の DbErr はそのまま上へ。Tx の外で呼ぶ（違反で abort した Tx に COMMIT を出さない）。",
+                    "    /// Runs a write against this table, translating constraint violations with `translate`.",
+                    "    /// `translate` either returns a value of the same type as the thunk, or raises a domain error effect. For a case you do not translate, call `raiseConstraint`.",
+                    "    /// A violation whose name is not in the enum, and any DbErr other than a constraint violation, pass through. Call it outside a Tx (so that no COMMIT is sent to a Tx the violation aborted).",
                     "    ///",
                     "    pub def onConstraint(translate: Constraint -> a \\ ef1, thunk: Unit -> a \\ ef2): a \\ ef1 + ef2 + {TransientDbErr, DbErr} =",
                     "        DbError.onConstraintWith(constraintOf, translate, thunk)",
                     "",
                     "    ///",
-                    "    /// 翻訳しない制約を元の DbErr に戻す。`onConstraint` に渡す関数の中で使う。",
+                    "    /// Turns a constraint you do not translate back into the original DbErr. Use it inside the function passed to `onConstraint`.",
                     "    ///",
                     "    pub def raiseConstraint(constraint: Constraint): a \\ DbErr = match constraint {",
                     List.join("\n", raises),

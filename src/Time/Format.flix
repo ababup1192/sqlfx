@@ -81,7 +81,7 @@ mod Format {
         case ('S', 3) => Format.Millis3
         case ('z', 3) => Format.ZoneName
         case ('x', 3) => Format.Offset
-        case _ => bug!("Format.pattern: '${String.repeat(count, "${letter}")}' は使えない（yyyy M MM MMMM d dd EEEE HH mm ss SSS zzz xxx）")
+        case _ => bug!("Format.pattern: '${String.repeat(count, "${letter}")}' is not a pattern (use one of: yyyy M MM MMMM d dd EEEE HH mm ss SSS zzz xxx)")
     }
 
     ///

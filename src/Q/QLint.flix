@@ -38,9 +38,9 @@ mod QLint {
         }
 
     def message(queryName: String, paramName: String): String =
-        "query ${queryName}: 引数 ${paramName} は Option だが、述語の `= :${paramName}` に置いている。"
-            + "SQL の `= NULL` は真にならないので、None を渡すと 1 行も引けない"
-            + "（NULL も引くなら `IS NOT DISTINCT FROM` を使うか、`:${paramName} IS NULL OR col = :${paramName}` と書く）"
+        "query ${queryName}: parameter ${paramName} is an Option, but it sits in the predicate `= :${paramName}`. "
+            + "SQL's `= NULL` is never true, so passing None matches no rows "
+            + "(to match NULL as well, use `IS NOT DISTINCT FROM`, or write `:${paramName} IS NULL OR col = :${paramName}`)"
 
     ///
     /// 素の SQL が等値の比較で終わっているか。`>=` と `<=` は範囲の比較なので数えない。

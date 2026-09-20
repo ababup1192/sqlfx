@@ -3,7 +3,7 @@
 /// 1 本の .q から出る注意書きの (件数, その引数名が出るか)。
 def lintCount(source: String, paramName: String): (Int32, Bool) =
     let found = QParser.parseFile(source) |> Result.map(QLint.warnings) |> Result.getWithDefault(Nil);
-    (List.length(found), List.exists(warning -> String.contains(substr = "引数 ${paramName} ", warning), found))
+    (List.length(found), List.exists(warning -> String.contains(substr = "parameter ${paramName} ", warning), found))
 
 /// WHERE / ON の `= :param` と `<> :param` に Option を置いたら注意する。
 ///
