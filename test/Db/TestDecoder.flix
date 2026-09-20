@@ -1,8 +1,14 @@
-use SqlValue.SqlValue
-use Decoder.DecodeError
+use Sqlfx.Date
+use Sqlfx.Decoder
+use Sqlfx.Row
+use Sqlfx.SqlValue
+use Sqlfx.Timestamp
+use Sqlfx.Uuid
+
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.Decoder.DecodeError
 
 // Decoder: 列を型付きで取り出し、複数列をレコードへ組む。
-
 
 /// テスト用の 1 行。
 ///

@@ -1,4 +1,7 @@
-use Format.Format
+use Sqlfx.Date
+use Sqlfx.Format
+
+use Sqlfx.Format.Format
 
 // Date: 年月日の検証、ISO 8601 の往復、日数の算術、表示。ゾーンには依存しない。
 

@@ -1,4 +1,7 @@
-use SqlValue.SqlValue
+use Sqlfx.JdbcConvert
+use Sqlfx.SqlValue
+
+use Sqlfx.SqlValue.SqlValue
 
 // JdbcConvert: `$n` → `?` の書き換え（純粋）。
 

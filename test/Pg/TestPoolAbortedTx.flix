@@ -1,5 +1,10 @@
-use DbError.DbErrorKind
-use DbError.Failure
+use Sqlfx.Db
+use Sqlfx.DbError
+use Sqlfx.Pool
+use Sqlfx.RawSql
+
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
 
 // ---- Tx の中で Db.attempt ----
 

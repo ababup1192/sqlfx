@@ -1,7 +1,9 @@
-use SqlValue.SqlValue
+use Sqlfx.SqlValue
+use Sqlfx.Timestamp
+
+use Sqlfx.SqlValue.SqlValue
 
 // SqlValue: 型ごとの取り出しと NULL 判定。
-
 
 /// as* は同じ型の値だけ Some で返し、違う型は None。
 @Test

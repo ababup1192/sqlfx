@@ -1,6 +1,17 @@
-use DbError.DbErrorKind
-use DbError.Failure
-use Savepoint.Command
+use Sqlfx.DbErr
+use Sqlfx.DbError
+use Sqlfx.DbTest
+use Sqlfx.RawSql
+use Sqlfx.Row
+use Sqlfx.Savepoint
+use Sqlfx.Sql
+use Sqlfx.SqlSavepoint
+use Sqlfx.TransientDbErr
+use Sqlfx.Tx
+
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
+use Sqlfx.Savepoint.Command
 
 // Savepoint: 名前の検査と SQL 化（純粋）。Tx.withSavepoint の SQL の並び（DbTest.runRecording で見る）。
 

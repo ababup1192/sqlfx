@@ -1,6 +1,15 @@
-use SqlValue.SqlValue
-use DbError.Failure
-use Migrate.Status
+use Sqlfx.DbErr
+use Sqlfx.DbError
+use Sqlfx.Decoder
+use Sqlfx.Jdbc
+use Sqlfx.Migrate
+use Sqlfx.Sql
+use Sqlfx.SqlValue
+use Sqlfx.TransientDbErr
+
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.DbError.Failure
+use Sqlfx.Migrate.Status
 
 // Migrate: 実 PG で apply / status / check。fixtures は test/fixtures/migrations（3 ファイル。003 は no-transaction）。
 

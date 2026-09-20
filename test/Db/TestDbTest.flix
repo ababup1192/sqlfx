@@ -1,7 +1,17 @@
-use SqlValue.SqlValue
-use Row.Row
-use DbError.Failure
-use DbError.DbErrorKind
+use Sqlfx.DbError
+use Sqlfx.DbRead
+use Sqlfx.DbTest
+use Sqlfx.Decoder
+use Sqlfx.RawSql
+use Sqlfx.Row
+use Sqlfx.Sql
+use Sqlfx.SqlValue
+use Sqlfx.SqlWrite
+
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.Row.Row
+use Sqlfx.DbError.Failure
+use Sqlfx.DbError.DbErrorKind
 
 // DbTest: テストハンドラと、Sql / DbError の使い心地。失敗は DbError.runWithFailure で 1 層の Result にして比べる。
 

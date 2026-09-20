@@ -1,8 +1,12 @@
-use QueryDef.Shape
-use SqlType.SqlType
-use QueryDef.SlotKind
-use QueryDef.Segment
-use QParser.ParseError
+use Sqlfx.Q.QParser
+use Sqlfx.Q.SqlType
+use Sqlfx.Timestamp
+
+use Sqlfx.Q.QueryDef.Shape
+use Sqlfx.Q.SqlType.SqlType
+use Sqlfx.Q.QueryDef.SlotKind
+use Sqlfx.Q.QueryDef.Segment
+use Sqlfx.Q.QParser.ParseError
 
 // QParser: .q の外側の文法と、本文の :name / {slot} の切り出し。
 

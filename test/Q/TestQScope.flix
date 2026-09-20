@@ -1,4 +1,9 @@
-use QScope.ScopeError
+use Sqlfx.Q.DdlParser
+use Sqlfx.Q.QParser
+use Sqlfx.Q.QScope
+use Sqlfx.Q.Schema
+
+use Sqlfx.Q.QScope.ScopeError
 
 // QScope: テナントの列（project_id）を持つ表を触る query に、その列の名前が無ければ止める。
 

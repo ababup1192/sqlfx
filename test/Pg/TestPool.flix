@@ -1,10 +1,17 @@
+use Sqlfx.Db
+use Sqlfx.DbError
+use Sqlfx.Decoder
+use Sqlfx.Pool
+use Sqlfx.RawSql
+use Sqlfx.Sql
+
 import java.lang.RuntimeException
 import java.lang.System
 
-use SqlValue.SqlValue
-use DbError.DbErrorKind
-use DbError.Failure
-use DbError.TransientKind
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
+use Sqlfx.DbError.TransientKind
 
 // Pool: HikariCP を包んだ接続プール。実 PG で、使い回し・枯渇時の待ち・閉じた後を確かめる。
 

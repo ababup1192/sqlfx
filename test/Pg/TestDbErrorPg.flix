@@ -1,7 +1,18 @@
-use SqlValue.SqlValue
-use DbError.DbErrorKind
-use DbError.Failure
-use DbError.TransientKind
+use Sqlfx.DbErr
+use Sqlfx.DbError
+use Sqlfx.DbWrite
+use Sqlfx.Jdbc
+use Sqlfx.RawSql
+use Sqlfx.Sql
+use Sqlfx.SqlRead
+use Sqlfx.SqlWrite
+use Sqlfx.TransientDbErr
+use Sqlfx.Tx
+
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
+use Sqlfx.DbError.TransientKind
 
 // DbErrorKind の分類を実 PG で起こす。SQLState → kind の翻訳表（SqlState.classifyWith）が DB 無しの表と、
 // 実際にサーバが返す物で食い違わないかと、isTransient（再試行に乗るか）を見る。

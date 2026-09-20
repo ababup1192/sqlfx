@@ -1,5 +1,11 @@
-use SqlType.SqlType
-use QResolve.ResolveError
+use Sqlfx.Q.DdlParser
+use Sqlfx.Q.QParser
+use Sqlfx.Q.QResolve
+use Sqlfx.Q.Schema
+use Sqlfx.Q.SqlType
+
+use Sqlfx.Q.SqlType.SqlType
+use Sqlfx.Q.QResolve.ResolveError
 
 // QResolve: .q の SQL を机上のスキーマに当てて、結果の列を決める。
 

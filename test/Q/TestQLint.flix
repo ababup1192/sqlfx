@@ -1,3 +1,7 @@
+use Sqlfx.Q.QLint
+use Sqlfx.Q.QParser
+use Sqlfx.Timestamp
+
 // QLint: 生成を止めない注意書き。Option の引数を述語の `=` の右に置いた query を拾う。
 
 /// 1 本の .q から出る注意書きの (件数, その引数名が出るか)。

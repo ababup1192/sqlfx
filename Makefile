@@ -48,17 +48,18 @@ db-down:
 	docker compose down -v
 
 # ---- 配布 ----
-# ライブラリだけを .fpkg に詰める。Main.flix（gen / migrate の CLI）と Q/ の生成器は入れない。
-# WhyNot: src/ をそのまま build-pkg しないのは、利用側の main と `def main` が、生成器の Schema モジュールが
-# 利用側の同名モジュールと衝突するため。生成器は利用側からも `bin/flix run -- gen` でこのリポジトリの main を使う。
+# ライブラリだけを .fpkg に詰める。Main.flix（gen / migrate の CLI）と Sqlfx/Q/ の生成器は入れない。
+# WhyNot: src/ をそのまま build-pkg しないのは、利用側の main と `def main` が衝突するため。
+# 生成器は利用側からも `bin/flix run -- gen` でこのリポジトリの main を使う。
 PKG_DIR = build/sqlfx
 
 pkg:
 	rm -rf $(PKG_DIR)
-	mkdir -p $(PKG_DIR)/src/Q
+	mkdir -p $(PKG_DIR)/src
 	cp flix.toml $(PKG_DIR)/flix.toml
-	cp -R src/Db src/Time src/Uuid $(PKG_DIR)/src/
-	cp src/Q/Fragment.flix $(PKG_DIR)/src/Q/
+	cp src/Sqlfx.flix $(PKG_DIR)/src/
+	cp -R src/Sqlfx $(PKG_DIR)/src/
+	rm -rf $(PKG_DIR)/src/Sqlfx/Q $(PKG_DIR)/src/Sqlfx/Q.flix
 	cd $(PKG_DIR) && $(CURDIR)/bin/flix build-pkg
 	@ls -l $(PKG_DIR)/artifact/
 

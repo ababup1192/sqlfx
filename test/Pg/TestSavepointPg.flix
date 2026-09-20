@@ -1,7 +1,18 @@
-use SqlValue.SqlValue
-use DbError.DbErrorKind
-use DbError.Failure
-use DbError.TransientKind
+use Sqlfx.Db
+use Sqlfx.DbErr
+use Sqlfx.DbError
+use Sqlfx.DbRead
+use Sqlfx.Decoder
+use Sqlfx.Pool
+use Sqlfx.RawSql
+use Sqlfx.Sql
+use Sqlfx.SqlValue
+use Sqlfx.Tx
+
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
+use Sqlfx.DbError.TransientKind
 
 // Tx.withSavepoint を実 PG で: 中の失敗が外の Tx に及ばない事、印（set_config）と INSERT が戻る事、入れ子。
 // 表とプールは TestPoolLeaks の物（sqlfx_test_leaks、大きさ 1 のプール）。

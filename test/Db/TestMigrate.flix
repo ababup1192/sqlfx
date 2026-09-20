@@ -1,3 +1,5 @@
+use Sqlfx.Migrate
+
 // Migrate: ファイル名の形式、no-transaction の印、checksum の正規化。DB は使わない。
 
 /// ファイル名は NNN_name.sql。番号は 3 桁以上のゼロ埋め。

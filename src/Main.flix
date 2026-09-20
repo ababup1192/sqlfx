@@ -1,3 +1,5 @@
+use Sqlfx.Q.QScope
+
 ///
 /// `bin/flix run -- gen [--scope <column>[:<effect>]]... <migrations/> <queries/> <out/>`: migrations でスキーマを組み、queries の .q から Flix を生成する。
 /// `--scope project_id` を付けると、その列を持つ表を触る query に列の条件が無ければ生成を止める（QScope）。
@@ -59,7 +61,14 @@ def scopeSpec(spec: String): QScope.Scope =
 
 mod MigrateCli {
 
-    use Migrate.Status
+    use Sqlfx.DbErr
+    use Sqlfx.DbError
+    use Sqlfx.Jdbc
+    use Sqlfx.Migrate
+    use Sqlfx.Timestamp
+    use Sqlfx.TransientDbErr
+
+    use Sqlfx.Migrate.Status
 
     ///
     /// 未適用を当てて、当てた version を表示する。失敗は表示して終了コード 1。
@@ -132,6 +141,14 @@ mod MigrateCli {
 }
 
 mod Gen {
+
+    use Sqlfx.Q.Codegen
+    use Sqlfx.Q.DdlParser
+    use Sqlfx.Q.QLint
+    use Sqlfx.Q.QParser
+    use Sqlfx.Q.QResolve
+    use Sqlfx.Q.QScope
+    use Sqlfx.Q.Schema
 
     ///
     /// 生成の入出力。3 つともディレクトリのパスなので、並べずに名前で持つ。

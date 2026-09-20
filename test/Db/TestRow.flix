@@ -1,7 +1,9 @@
-use SqlValue.SqlValue
+use Sqlfx.Row
+use Sqlfx.SqlValue
+
+use Sqlfx.SqlValue.SqlValue
 
 // Row: 列名 → 添字の共有インデックスと、列名での取り出し。
-
 
 /// makeRows は列名を添字に変え、全行で同じ ColumnIndex を持つ。
 ///

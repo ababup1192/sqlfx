@@ -1,6 +1,10 @@
-use SqlType.SqlType
-use DdlParser.DdlError
-use Schema.ConstraintKind
+use Sqlfx.Q.DdlParser
+use Sqlfx.Q.Schema
+use Sqlfx.Q.SqlType
+
+use Sqlfx.Q.SqlType.SqlType
+use Sqlfx.Q.DdlParser.DdlError
+use Sqlfx.Q.Schema.ConstraintKind
 
 // DdlParser: migrations の DDL から机上のスキーマを組む。
 

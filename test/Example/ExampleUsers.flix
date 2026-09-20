@@ -3,9 +3,15 @@
 /// 本体には入れず、テストからだけ使う。
 ///
 mod ExampleUsers {
+    use Sqlfx.DbRead
+    use Sqlfx.DbWrite
+    use Sqlfx.Decoder
+    use Sqlfx.RawSql
+    use Sqlfx.Sql
+    use Sqlfx.SqlValue
 
-    use SqlValue.SqlValue
-    use Decoder.Decoder
+    use Sqlfx.SqlValue.SqlValue
+    use Sqlfx.Decoder.Decoder
 
     ///
     /// users テーブルの 1 行。

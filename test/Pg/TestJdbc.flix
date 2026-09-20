@@ -1,6 +1,20 @@
-use SqlValue.SqlValue
-use DbError.DbErrorKind
-use DbError.Failure
+use Sqlfx.Date
+use Sqlfx.Db
+use Sqlfx.DbError
+use Sqlfx.DbWrite
+use Sqlfx.Decoder
+use Sqlfx.Jdbc
+use Sqlfx.RawSql
+use Sqlfx.Row
+use Sqlfx.Sql
+use Sqlfx.SqlValue
+use Sqlfx.Timestamp
+use Sqlfx.Tx
+use Sqlfx.Uuid
+
+use Sqlfx.SqlValue.SqlValue
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.Failure
 
 // Jdbc: 実 PostgreSQL に当たる層 5 のテスト。test/ の外に置き、make test-pg がコンテナを立てて test/Pg/ へ写して回す。
 

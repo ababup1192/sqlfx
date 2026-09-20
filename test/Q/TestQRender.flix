@@ -1,6 +1,9 @@
-use QueryDef.Segment
-use QueryDef.SlotKind
-use QueryDef.Shape
+use Sqlfx.Q.QParser
+use Sqlfx.Q.QRender
+
+use Sqlfx.Q.QueryDef.Segment
+use Sqlfx.Q.QueryDef.SlotKind
+use Sqlfx.Q.QueryDef.Shape
 
 // QRender: AST から完全な SQL への機械置換。
 

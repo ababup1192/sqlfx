@@ -1,3 +1,8 @@
+use Sqlfx.Db
+use Sqlfx.DbErr
+use Sqlfx.DbError
+use Sqlfx.TransientDbErr
+
 import java.lang.AssertionError
 import java.lang.InternalError
 import java.lang.Throwable
@@ -6,8 +11,8 @@ import java.lang.OutOfMemoryError
 import java.lang.RuntimeException
 import java.lang.StackOverflowError
 
-use DbError.DbErrorKind
-use DbError.TransientKind
+use Sqlfx.DbError.DbErrorKind
+use Sqlfx.DbError.TransientKind
 
 // DbError: 2 つのエフェクトの op は 1 本（raise）で、種類は DbErrorKind の値。
 // 値 → op → 値の往復と、1 腕だけの手書きハンドラを確かめる。

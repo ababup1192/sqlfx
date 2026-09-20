@@ -1,3 +1,5 @@
+use Sqlfx.Uuid
+
 // Uuid: 形式の検証と random の形。
 
 /// 36 文字の形だけ通り、小文字に揃う。

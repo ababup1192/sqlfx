@@ -1,3 +1,6 @@
+use Sqlfx.DbError
+use Sqlfx.Pool
+
 // Pool: 開いただけのプールの数字（DB 無し。open は接続しない）。
 
 /// 到達しない接続先。open は接続しに行かないので、数字を読むだけなら DB は要らない。
