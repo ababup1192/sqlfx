@@ -1,6 +1,6 @@
 # 層1: `.q` → 型付き関数（実装メモ）
 
-design.md §3 / §5 の実装。モジュールは `src/Q/` にトップレベルで平らに置く。
+design.md §3 / §5 の実装。モジュールは `src/Sqlfx/Q/`（`Sqlfx.Q.*`）に平らに置く。断片 DSL の `Fragment` だけは配布物なので `src/Sqlfx/Fragment.flix`。
 
 ```
 SqlType     .q の型名 / PG の型名 / SqlValue の case / 生成する Flix の型 の対応表
@@ -11,7 +11,7 @@ Schema      机上のスキーマ（テーブル名 → 列の名前・型・NUL
 DdlParser   migrations の DDL → Schema。読めない文は警告
 SqlTokens   SQL の字句（QResolve が使う）
 QResolve    SELECT の FROM / JOIN / リストを Schema に当てて結果の列を決める
-Fragment    断片 DSL（Col / Pred / Order と render）。RawSql エフェクトは層0（src/Db/RawSql.flix）
+Fragment    断片 DSL（Col / Pred / Order と render）。RawSql エフェクトは層0（src/Sqlfx/RawSql.flix）
 Codegen     Resolved → Flix ソース
 src/Main.flix  `bin/flix run -- gen <migrations> <queries> <out>`
 ```
@@ -42,7 +42,7 @@ CREATE INDEX は無視、それ以外の文は警告。`NUMERIC(10, 2)` のよ�
 
 ## 制約の enum（Tables.flix）
 
-テーブルに名前付きの制約があれば、`mod UsersTable` に `enum Constraint { case EmailKey ... }`（`users_` の接頭辞を落として PascalCase）、
+テーブルに名前付きの制約があれば、`mod Sqlfx.UsersTable` に `enum Constraint { case EmailKey ... }`（`users_` の接頭辞を落として PascalCase）、
 `constraintOf` / `constraintName`、翻訳しない case を元の `DbErr` に戻す `raiseConstraint`、翻訳しながら書き込む `onConstraint` を出す。
 `onConstraint` は `DbError.onConstraintWith(constraintOf, translate, thunk)` を包んだだけで、translate は enum 上の全域関数。
 case が足りなければコンパイルエラーになるので、制約を足して再生成すると翻訳の書き忘れが型で見つかる。
@@ -70,7 +70,7 @@ pub def renameUser(id: Int64, name: String): Int32 \ SqlWrite
 pub def sourceHash(): Int32   // .q の中身のハッシュ。gen --check が生成物ごと現物と照合する
 ```
 
-- ファイル `users.q` → `mod UsersQueries`、テーブル `users` → `mod UsersTable`（印の enum と列の `Col`）
+- ファイル `users.q` → `mod Sqlfx.UsersQueries`、テーブル `users` → `mod Sqlfx.UsersTable`（印の enum と列の `Col`）
 - 列名は camelCase（`user_id` → `userId`）、予約語は末尾 `_`
 - 引数が 2 つ以上の query は 1 つのレコードで受ける（`insertUser({ name = "a", email = "a@x", role = "member" })`）。同じ型が並んでも取り違えない
 - slot は宣言順に引数の後ろへ。Pred は `Fragment.appendPred`、Changes は `Fragment.appendChanges` で `$n` を続き番号で振り、Order は `Fragment.renderOrder`
@@ -96,7 +96,7 @@ Fragment.noChange() |> Fragment.setIfSome(PostsTable.title(), edit#title) |> Fra
 
 ## デモ（examples/blog）
 
-flix.toml を持つ独立した Flix プロジェクト。本体は `make vendor` で `../../src/Db` と `../../src/Q` を `src/sqlfx/` に写して使う
+flix.toml を持つ独立した Flix プロジェクト。本体は `make vendor` で `../../src/Sqlfx.flix` と `../../src/Sqlfx/` を `src/` に写して使う
 （flix.toml の依存は GitHub のリリースしか指せず、`lib/` の .fpkg は flix.toml があると読まれないため）。
 `make gen` で `src/Gen/` を作り直し、`make test` が DB 無し → 実 PG の順に回す。生成物が最新かは本体側の `gen --check`（`make gen-check`）と `test/Q/TestGen.flix` で確かめる。生成物の形を決めているのは Codegen なので、デモ側にはこの検査を置かない。
 テストは「.q から生成した関数を使う版」（`Blog` / TestGenerated*）と「生 SQL をインラインで書く版」（`BlogRaw` / TestRawSql*）の 2 系統で、同じ筋書きを両方で通す。

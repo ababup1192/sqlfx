@@ -8,7 +8,7 @@
 
 モジュールはトップレベルに平らに置く（`SqlValue` / `Row` / `Decoder` / `Sql` / `DbError` / `Jdbc` / `DbTest`）。
 `Db.SqlValue` のようなドット付きモジュールは 0.75.3 で型が解決されず、`mod Db { ... }` は 1 ファイルにしか
-書けない（[spikes.md](spikes.md)）ため。ファイルは `src/Db/` 以下に置く。
+書けない（[spikes.md](spikes.md)）ため。ファイルは `src/Sqlfx/` 以下に置く。
 
 ## 全体像
 
@@ -30,21 +30,22 @@ Decoder（純粋）  Row -> Result[DecodeError, a]
 
 | ファイル | 中身 |
 |---|---|
-| `src/Db/SqlValue.flix` | `enum SqlValue`。行き（プレースホルダ）と帰り（セル）の両方 |
-| `src/Db/Row.flix` | `Row` / `ColumnIndex` / `Statement` |
-| `src/Db/Decoder.flix` | `Decoder[a]` と組み合わせ関数 |
-| `src/Time/*.flix` | `Timestamp`（UTC の瞬間）/ `Date`（暦日）/ `Zone` + `eff TimeZone` / `Format` トークン / `TimeTest.runFrozen`。DB の層に依存しない |
-| `src/Uuid/Uuid.flix` | `Uuid`。`fromString` は `Option`、`random` は `NonDet` |
-| `src/Db/Sql.flix` | `eff SqlRead` / `eff SqlWrite` |
-| `src/Db/DbError.flix` | `eff TransientDbErr` / `eff DbErr` / `enum DbErrorKind` / `enum DbFailure` |
-| `src/Db/Retry.flix` | `Retry.withRetry` |
-| `src/Db/Tx.flix` | `Tx.withTx` |
-| `src/Db/Jdbc/SqlState.flix` | `mod SqlState`: sqlstate → `DbErrorKind`（純粋） |
-| `src/Db/Jdbc/JdbcConvert.flix` | `mod JdbcConvert`: `SqlValue` ⇔ JDBC の変換（Java 型はここに閉じる） |
-| `src/Db/Jdbc/Jdbc.flix` | `mod Jdbc`: `runWithConnection` / `withConnection`（1 回だけ開く） |
-| `src/Db/Jdbc/Pool.flix` | `mod Pool`: HikariCP を包んだ接続プール。`open` / `close` / `withConnection`（借りて返す） |
-| `src/Db/Migrate.flix` | `mod Migrate`: migrations/*.sql を DB に当てる。`apply` / `check` / `status`、記録は `sqlfx_migrations` |
-| `src/Db/Test/DbTest.flix` | `runWithRows` / `runRecording` / `runLogging`（1 モジュール 1 宣言なので 1 ファイル） |
+| `src/Sqlfx/SqlValue.flix` | `enum SqlValue`。行き（プレースホルダ）と帰り（セル）の両方 |
+| `src/Sqlfx/Row.flix` | `Row` / `ColumnIndex` / `Statement` |
+| `src/Sqlfx/Decoder.flix` | `Decoder[a]` と組み合わせ関数 |
+| `src/Sqlfx/Timestamp.flix` ほか | `Timestamp`（UTC の瞬間）/ `Date`（暦日）/ `Zone` + `eff TimeZone` / `Format` トークン / `TimeTest.runFrozen`。DB の層に依存しない |
+| `src/Sqlfx/Uuid.flix` | `Uuid`。`fromString` は `Option`、`random` は `NonDet` |
+| `src/Sqlfx.flix` | `eff SqlRead` / `eff SqlWrite` / `eff TransientDbErr` / `eff DbErr` / `eff SqlSavepoint` / `eff RawSql` / `eff TimeZone` と alias。Flix は 1 モジュールを複数ファイルに書けないので 1 つに集める |
+| `src/Sqlfx/Sql.flix` | `Sql.fetch` / `Sql.execute`（エフェクトを使う側） |
+| `src/Sqlfx/DbError.flix` | `enum DbErrorKind` / `enum DbFailure`（投げる関数は `src/Sqlfx/DbErr.flix` と `src/Sqlfx/TransientDbErr.flix`） |
+| `src/Sqlfx/Retry.flix` | `Retry.withRetry` |
+| `src/Sqlfx/Tx.flix` | `Tx.withTx` |
+| `src/Sqlfx/SqlState.flix` | `mod Sqlfx.SqlState`: sqlstate → `DbErrorKind`（純粋） |
+| `src/Sqlfx/JdbcConvert.flix` | `mod Sqlfx.JdbcConvert`: `SqlValue` ⇔ JDBC の変換（Java 型はここに閉じる） |
+| `src/Sqlfx/Jdbc.flix` | `mod Sqlfx.Jdbc`: `runWithConnection` / `withConnection`（1 回だけ開く） |
+| `src/Sqlfx/Pool.flix` | `mod Sqlfx.Pool`: HikariCP を包んだ接続プール。`open` / `close` / `withConnection`（借りて返す） |
+| `src/Sqlfx/Migrate.flix` | `mod Sqlfx.Migrate`: migrations/*.sql を DB に当てる。`apply` / `check` / `status`、記録は `sqlfx_migrations` |
+| `src/Sqlfx/DbTest.flix` | `runWithRows` / `runRecording` / `runLogging`（1 モジュール 1 宣言なので 1 ファイル） |
 
 ## 値: `SqlValue`
 
@@ -309,10 +310,10 @@ pub def registerUser(name: String, email: String): Result[RegisterError, Int64] 
 - `Jdbc.withConnection(config, conn -> ...)`: 開いて `runWithConnection` を被せ、成功でも失敗でも閉じる。Tx が要るなら中で `Tx.withTx(conn, ...)`
 - `Decoder` は `Functor` / `Applicative` の instance を持つので `forA` で列を並べて組める（yield は純粋に書く）。`Monad` は付けない（次に読む列が値で決まると SELECT 句を静的に組めない）
 - `Decoder` は読む列の一覧を持つ。`Decoder.selectList` / `selectClause` で SELECT 句を組み、`selectExpr(expr, d)` で `expr AS label` の式の列を作る
-- 生の SQL 文字列を渡す `Sql.*` には `RawSql` が付く（`src/Db/RawSql.flix`）。防止ではなく責任の所在を示す標識で、境界と生成コードが `RawSql.runWithAllow` で許可する。生成関数の許可は生成器の文字列だけを囲み、slot の `Fragment.rawPred` は呼び出し側に残る
+- 生の SQL 文字列を渡す `Sql.*` には `RawSql` が付く（`src/Sqlfx/RawSql.flix`）。防止ではなく責任の所在を示す標識で、境界と生成コードが `RawSql.runWithAllow` で許可する。生成関数の許可は生成器の文字列だけを囲み、slot の `Fragment.rawPred` は呼び出し側に残る
 - `DbTest.runRecordingWith(rowsFor, affected, thunk)`: SQL ごとに行を返しつつ記録する。preload の「クエリは 2 つ」を確かめるのに使う
 - `--` から行末は JDBC ハンドラでも落とす（コメント中の `'` や `$1` を見ないため）
-- `SqlSavepoint`（`src/Db/Savepoint.flix`）: `control(command: Savepoint.Command): Result[DbErrorKind, Unit]` の 1 op。`Tx.withSavepoint(name, thunk)` が
+- `SqlSavepoint`（`src/Sqlfx/Savepoint.flix`）: `control(command: Savepoint.Command): Result[DbErrorKind, Unit]` の 1 op。`Tx.withSavepoint(name, thunk)` が
   `SAVEPOINT` → thunk → `RELEASE` / `ROLLBACK TO` の形で使い、中の失敗を `Result[Failure, a]` にして外の Tx を続ける。読むだけの Tx でも張れるよう
   `SqlWrite` とは別の効果にした。JDBC / Pool / DbTest の handler が並べて受ける（`runLogging` は転送しない）
 - `Preload.attach({ parents, parentKey, children, childKey })`: IN 句バッチで取った子を親ごとに束ねる。子は元の順、無い親は Nil。`keyed` の preloader 生成（フェーズ 3）もこれを呼ぶ

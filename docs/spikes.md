@@ -20,7 +20,7 @@ Phase 0 のスパイクと、実装中に分かった Flix 0.75.3 の制約。�
 - **モジュールは 1 宣言 1 か所**。`mod Db { ... }` を複数ファイルに分けると `Duplicate module: 'Db'`。
   `mod Db.SqlValue { enum SqlValue }` のドット付きも、関数は `Db.SqlValue.isNull` で引けるのに
   型 `Db.SqlValue.SqlValue` が `Undefined type` になる。→ モジュールはトップレベルに平らに置く
-  （`SqlValue` / `Row` / `Decoder` ...）。ファイルの置き場は `src/Db/` のままでよい
+  （`SqlValue` / `Row` / `Decoder` ...）。ファイルの置き場は `src/Sqlfx/` のままでよい
 - `mod Foo { pub enum Foo }` の型は `Foo.Foo`。`use Foo.Foo` で短くできる
 - テストファイルの `use` はファイル先頭。`///` の doc コメントを `use` より前に置くとパースエラー（import と同じ）。
   ファイル見出しは `//` で書く
