@@ -117,23 +117,25 @@ declared. An **op** is one operation of an effect — `SqlRead` has one (`fetch`
 
 ### Write the SQL, and get back a typed function
 
-`.q` is the default road. The generator builds a schema from the `migrations/*.sql`, matches each
-SELECT against it, and decides every result column's name, Flix type and nullability from the DDL
-rather than from a guess:
+`.q` is the default road. `bin/flix run -- gen migrations/ queries/ src/Gen/` runs this:
 
-```
-   migrations/*.sql ──┐
-                      ├──▶  bin/flix run -- gen migrations/ queries/ src/Gen/
-   queries/*.q ───────┘             │
-                                    ▼
-                         src/Gen/Tables.flix         one module per table: its columns as Col values
-                         src/Gen/UsersQueries.flix   users.q: its functions, row types and decoders
-                         src/Gen/PostsQueries.flix
+```mermaid
+flowchart LR
+  ddl["migrations/*.sql"] -->|"read as DDL"| schema["schema, in memory:<br/>columns, Flix types,<br/>NOT NULL, named constraints"]
+  q["queries/*.q"] -->|"parsed: params and slots"| resolve["every SELECT resolved<br/>against that schema"]
+  schema -->|"decides each result column's<br/>name, type and nullability"| resolve
+  resolve -->|"no such table or column,<br/>expression with no cast"| stop["generation stops,<br/>nothing is written"]
+  resolve -->|"--scope project_id:Tenant<br/>drops that parameter"| gen["codegen"]
+  schema -->|"one module per table"| gen
+  gen -->|"writes Col values, the Constraint enum, onConstraint"| tables["src/Gen/Tables.flix"]
+  gen -->|"writes the row type, its decoder, the typed function"| qf["src/Gen/UsersQueries.flix"]
+  gen -.->|"gen --check renders again and compares;<br/>a stale file fails the build"| qf
+  tables -->|"columns as values"| app["your code:<br/>an effect, no connection"]
+  qf -->|"called directly"| app
 ```
 
-A table or a column that does not exist stops generation rather than failing at run time. The
-generated file carries a hash of the `.q` it came from, so `gen --check` fails a build where
-somebody edited the SQL and forgot to regenerate.
+Every type in the generated code is read off the DDL, and a query the schema cannot account for
+stops the build instead of failing at run time.
 
 A query with two or more parameters takes a record, so two `String`s cannot be swapped by accident:
 
@@ -386,6 +388,25 @@ pub enum DbErrorKind {
 }
 ```
 
+```mermaid
+flowchart TD
+  pg["PostgreSQL rejects the statement"] -->|"SQLSTATE, and the constraint name<br/>from pgjdbc's ServerErrorMessage"| cl["SqlState.classify"]
+  cl -->|"40001, 40P01, 57014, 55P03, 08xxx, 57P01"| tr["TransientDbErr.raise"]
+  cl -->|"23505, 23503, 23514, 23502"| pe["DbErr.raise, carrying the constraint name"]
+  dec["a row the decoder cannot read"] -->|"DecodeError, with no SQLSTATE"| pe
+  tr -->|"withRetry calls the thunk again, from the top"| retry["one more attempt"]
+  tr -->|"no attempt left"| re["DbErr.retryExhausted"]
+  pe -->|"the name is a case of that table's Constraint enum"| dom["onConstraint translates it into<br/>your own effect, say emailTaken"]
+  pe -->|"any other name, and every failure that is not a violation"| up["DbErr travels on, unchanged"]
+  re -->|"now a permanent failure"| up
+  up -->|"Tx.withTx: ROLLBACK, then raise again"| bd["DbError.runWithFailure, at the boundary"]
+  up -.->|"raised inside Tx.withSavepoint: ROLLBACK TO that savepoint,<br/>and come back as an Err"| sv["the outer transaction can still commit"]
+  bd -->|"Transient is 503, UniqueViolation 409, the rest 500"| out["one Result, matched once"]
+```
+
+Every route a failed statement can take, and the three places you can step into it: `withRetry`,
+`onConstraint`, and the boundary.
+
 You raise through a function per kind (`DbErr.uniqueViolation(c)`, `DbErr.other(msg)`,
 `TransientDbErr.timeout(ms)`, …). A hand-written handler needs one arm, and keeps compiling when a
 case is added to `DbErrorKind`:
@@ -451,10 +472,9 @@ def translateUserConstraint(user: NewUser, constraint: UsersTable.Constraint): a
 }
 ```
 
-A violation whose name is not in the enum — one added by hand in production, say — and any failure
-that is not a constraint violation stay `DbErr` and travel on. Call `onConstraint` **outside**
-`Tx.withTx`: PostgreSQL aborts the transaction on the violation, so translating inside and returning
-a value makes `withTx` send a COMMIT to a transaction that is already dead.
+Call `onConstraint` **outside** `Tx.withTx`: PostgreSQL aborts the transaction on the violation, so
+translating inside and returning a value makes `withTx` send a COMMIT to a transaction that is
+already dead.
 
 The reason to put the length limit in the DDL in the first place is that the `CHECK` is the only
 thing every path goes through — a batch job, a psql session, the next application. Validation in the
@@ -694,14 +714,22 @@ target when somebody reorders the file.
 Everything sqlfx needs decided lives at the entry point; the functions in between take an effect and
 nothing more.
 
+```mermaid
+flowchart TD
+  f["DbError.runWithFailure"] -->|"takes DbErr and TransientDbErr out of the type;<br/>one Result comes back"| r["Retry.withRetryWith"]
+  r -->|"takes TransientDbErr out: calls the thunk again from the top"| c["Pool.withConnection"]
+  c -->|"borrows one connection, and answers SqlRead, SqlWrite, SqlSavepoint with JDBC"| raw["RawSql.runWithAllow"]
+  raw -->|"takes RawSql out: the one place hand-written SQL is allowed"| oc["UsersTable.onConstraint"]
+  oc -->|"turns a violation of that table into your domain effect"| tx["Tx.withTx"]
+  tx -->|"BEGIN, then COMMIT, or ROLLBACK and raise again"| uc["your use case:<br/>effect DbWrite, nothing else"]
+  test["DbTest.runWithRows, DbTest.runRecording"] -.->|"a unit test answers the same three ops in memory,<br/>and every other layer stays as it is"| uc
+```
+
+Each layer answers one effect and removes it from the type, and only the layer that answers
+`SqlRead` / `SqlWrite` is swapped in a test.
+
 ```flix
 let pool = Pool.open(Pool.defaultConfig(config));   // once at startup; Pool.close at shutdown
-
-Retry.withRetry(3, () ->                            // a Transient failure calls the thunk again, from the top
-    Pool.withConnection(pool, conn ->               // borrow, and always return
-        UsersTable.onConstraint(translate, () ->    // translate constraint violations outside the Tx
-            Tx.withTx(conn, () ->                   // BEGIN / COMMIT; ROLLBACK and re-raise on failure
-                Blog.removeUser(1i64)))))
 ```
 
 `Pool.defaultConfig(connection)` is `{ connection, maxConnections = 10, borrowTimeoutMs = 5000,
@@ -709,8 +737,7 @@ leakDetectionThresholdMs = 0 }`, over a `{ url, user, password }`. `Pool.open` d
 first borrow does. For a CLI or a test that connects once, `Jdbc.withConnection(config, conn -> …)`
 skips the pool entirely.
 
-At the edge shared by every HTTP handler, stack `DbError.runWithFailure` (→ 500 / 503),
-`Retry.withRetryWith`, `Pool.withConnection` and `RawSql.runWithAllow`. What each handler writes for
+Stack the four outer ones at the edge shared by every HTTP handler. What each handler writes for
 itself is the validation, the transaction boundary, and the constraint translation. Domain errors
 (`RegisterErr` and the like) are translated in the service layer and mapped to a status in the
 controller; [`examples/blog/src/BlogForm.flix`](examples/blog/src/BlogForm.flix) shows them joined
@@ -736,22 +763,26 @@ translated too, and the connection goes back to autocommit.
 
 ### Where a failure may become a value
 
-Collapsing a failure into a value in the middle of a transaction is the one thing worth being
-careful about, because a `Result` that looks like `Ok` makes `withLazyTx` send a COMMIT.
-
 `Db.attempt(thunk)` gives you a `Result` per call — for a batch that collects an outcome per row:
 
 ```flix
 rows |> List.map(row -> (row, Db.attempt(() -> UsersQueries.insertUser(row))))
 ```
 
-**`Db.attempt` does not roll anything back.** If the `Err` came from the server, PostgreSQL has
-already marked the transaction aborted, every later statement fails with 25P02, and `withLazyTx`
-returns `DbErr.rollback` no matter what the thunk returned. If the failure never reached the server
-(`Rollback`, `DecodeError`, something raised through the effect) the transaction is alive and the
-`Err` is an ordinary value that gets committed. Neither is what you meant, so use `Db.attempt`
-outside a transaction, or inside `Pool.withConnection`. To turn a failure into a value *inside* a
-transaction, use `Pool.withLazyTxResult`:
+```mermaid
+flowchart TD
+  q{"a failure inside the withLazyTx thunk:<br/>did it reach the server?"}
+  q -->|"yes: PostgreSQL has already marked the transaction aborted"| a["every later statement fails with 25P02,<br/>and withLazyTx returns DbErr.rollback<br/>whatever the thunk returned"]
+  q -->|"no: Rollback, DecodeError, an effect raised in your own code"| b["the transaction is still alive"]
+  b -->|"Db.attempt made it a value, so the thunk still returns Ok"| c["withLazyTx sends COMMIT"]
+  b -->|"Pool.withLazyTxResult reads the Err itself"| d["ROLLBACK, and that same Err comes back"]
+```
+
+Whether the failure reached the server decides what a `Result` inside the transaction means, and
+only `withLazyTxResult` ties that value back to the rollback.
+
+**`Db.attempt` does not roll anything back**, so use it outside a transaction, or inside
+`Pool.withConnection`. To turn a failure into a value *inside* one, use `Pool.withLazyTxResult`:
 
 ```flix
 // receive RegisterErr (a domain error effect) inside the Tx, and roll back on Err
@@ -1180,21 +1211,24 @@ HikariCP が SLF4J で書くからで、束縛が無いと最初の利用時に�
 
 ### SQL を書くと、型付きの関数が返る
 
-`.q` が既定の道。生成器は `migrations/*.sql` から机上のスキーマを組み、SELECT を当てて、
-結果の列の名前・Flix の型・NULL 可否を推測でなく DDL から決める:
+`.q` が既定の道。`bin/flix run -- gen migrations/ queries/ src/Gen/` が走らせるのはこれ:
 
-```
-   migrations/*.sql ──┐
-                      ├──▶  bin/flix run -- gen migrations/ queries/ src/Gen/
-   queries/*.q ───────┘             │
-                                    ▼
-                         src/Gen/Tables.flix         テーブルごとの module。列が Col の値で出る
-                         src/Gen/UsersQueries.flix   users.q の関数・行レコード・デコーダ
-                         src/Gen/PostsQueries.flix
+```mermaid
+flowchart LR
+  ddl["migrations/*.sql"] -->|"read as DDL"| schema["schema, in memory:<br/>columns, Flix types,<br/>NOT NULL, named constraints"]
+  q["queries/*.q"] -->|"parsed: params and slots"| resolve["every SELECT resolved<br/>against that schema"]
+  schema -->|"decides each result column's<br/>name, type and nullability"| resolve
+  resolve -->|"no such table or column,<br/>expression with no cast"| stop["generation stops,<br/>nothing is written"]
+  resolve -->|"--scope project_id:Tenant<br/>drops that parameter"| gen["codegen"]
+  schema -->|"one module per table"| gen
+  gen -->|"writes Col values, the Constraint enum, onConstraint"| tables["src/Gen/Tables.flix"]
+  gen -->|"writes the row type, its decoder, the typed function"| qf["src/Gen/UsersQueries.flix"]
+  gen -.->|"gen --check renders again and compares;<br/>a stale file fails the build"| qf
+  tables -->|"columns as values"| app["your code:<br/>an effect, no connection"]
+  qf -->|"called directly"| app
 ```
 
-無いテーブル・無い列は実行時でなく生成時に止まる。生成物には元の `.q` のハッシュが入るので、
-SQL を直して生成し忘れたビルドは `gen --check` が落とす。
+生成物の型は全部 DDL から読んだ物で、スキーマで説明の付かない query は実行時でなく生成時に止まる。
 
 引数が 2 つ以上の query はレコードで受ける。`String` が 2 つ並んでも取り違えない:
 
@@ -1438,6 +1472,24 @@ pub enum DbErrorKind {
 }
 ```
 
+```mermaid
+flowchart TD
+  pg["PostgreSQL rejects the statement"] -->|"SQLSTATE, and the constraint name<br/>from pgjdbc's ServerErrorMessage"| cl["SqlState.classify"]
+  cl -->|"40001, 40P01, 57014, 55P03, 08xxx, 57P01"| tr["TransientDbErr.raise"]
+  cl -->|"23505, 23503, 23514, 23502"| pe["DbErr.raise, carrying the constraint name"]
+  dec["a row the decoder cannot read"] -->|"DecodeError, with no SQLSTATE"| pe
+  tr -->|"withRetry calls the thunk again, from the top"| retry["one more attempt"]
+  tr -->|"no attempt left"| re["DbErr.retryExhausted"]
+  pe -->|"the name is a case of that table's Constraint enum"| dom["onConstraint translates it into<br/>your own effect, say emailTaken"]
+  pe -->|"any other name, and every failure that is not a violation"| up["DbErr travels on, unchanged"]
+  re -->|"now a permanent failure"| up
+  up -->|"Tx.withTx: ROLLBACK, then raise again"| bd["DbError.runWithFailure, at the boundary"]
+  up -.->|"raised inside Tx.withSavepoint: ROLLBACK TO that savepoint,<br/>and come back as an Err"| sv["the outer transaction can still commit"]
+  bd -->|"Transient is 503, UniqueViolation 409, the rest 500"| out["one Result, matched once"]
+```
+
+失敗した 1 文が辿る経路の全部と、割り込める 3 か所（`withRetry`、`onConstraint`、境界）。
+
 投げる側は種類ごとの関数を使う（`DbErr.uniqueViolation(c)` / `DbErr.other(msg)` /
 `TransientDbErr.timeout(ms)` …）。自分でハンドラを書く側は 1 腕で済み、`DbErrorKind` に case が
 増えても壊れない:
@@ -1500,7 +1552,6 @@ def translateUserConstraint(user: NewUser, constraint: UsersTable.Constraint): a
 }
 ```
 
-enum に無い名前の違反（本番に手で足した制約など）と、制約違反以外の失敗は `DbErr` のまま上へ流れる。
 `onConstraint` は `Tx.withTx` の**外**で呼ぶ。PostgreSQL は違反で Tx を abort するので、内側で翻訳して
 値を返すと、既に死んでいる Tx に `withTx` が COMMIT を出してしまう。
 
@@ -1725,14 +1776,22 @@ pub def listEntries(limit: Int64): List[ListEntriesRow] \ DbRead + Tenant   // �
 
 sqlfx に決めてもらう事は全部エントリポイントに置く。間の関数が持つのはエフェクトだけ。
 
+```mermaid
+flowchart TD
+  f["DbError.runWithFailure"] -->|"takes DbErr and TransientDbErr out of the type;<br/>one Result comes back"| r["Retry.withRetryWith"]
+  r -->|"takes TransientDbErr out: calls the thunk again from the top"| c["Pool.withConnection"]
+  c -->|"borrows one connection, and answers SqlRead, SqlWrite, SqlSavepoint with JDBC"| raw["RawSql.runWithAllow"]
+  raw -->|"takes RawSql out: the one place hand-written SQL is allowed"| oc["UsersTable.onConstraint"]
+  oc -->|"turns a violation of that table into your domain effect"| tx["Tx.withTx"]
+  tx -->|"BEGIN, then COMMIT, or ROLLBACK and raise again"| uc["your use case:<br/>effect DbWrite, nothing else"]
+  test["DbTest.runWithRows, DbTest.runRecording"] -.->|"a unit test answers the same three ops in memory,<br/>and every other layer stays as it is"| uc
+```
+
+層は 1 つずつエフェクトに答えて型から外していき、テストで差し替えるのは `SqlRead` / `SqlWrite` に
+答える層だけ。
+
 ```flix
 let pool = Pool.open(Pool.defaultConfig(config));   // 起動時に 1 回。終了時に Pool.close
-
-Retry.withRetry(3, () ->                            // Transient なら thunk を最初から呼び直す
-    Pool.withConnection(pool, conn ->               // プールから借りて、必ず返す
-        UsersTable.onConstraint(translate, () ->    // 制約違反の翻訳は Tx の外
-            Tx.withTx(conn, () ->                   // BEGIN / COMMIT。失敗なら ROLLBACK して再送出
-                Blog.removeUser(1i64)))))
 ```
 
 `Pool.defaultConfig(connection)` は `{ connection, maxConnections = 10, borrowTimeoutMs = 5000,
@@ -1740,8 +1799,7 @@ leakDetectionThresholdMs = 0 }` で、`connection` は `{ url, user, password }`
 接続せず、最初の borrow で開く。CLI やテストのように 1 回だけ繋ぐなら
 `Jdbc.withConnection(config, conn -> …)` でプールを使わない。
 
-全 HTTP ハンドラ共通の縁には `DbError.runWithFailure`（→ 500 / 503）、`Retry.withRetryWith`、
-`Pool.withConnection`、`RawSql.runWithAllow` を重ねる。ハンドラごとに書くのは検証・Tx の範囲・
+外側の 4 つは全 HTTP ハンドラ共通の縁に重ねる。ハンドラごとに書くのは検証・Tx の範囲・
 制約違反の翻訳。業務エラー（`RegisterErr` のような物）は service 層で翻訳し、controller で HTTP の
 ステータスに写す。検証のエラーと 1 つの型にまとめる例が
 [`examples/blog/src/BlogForm.flix`](examples/blog/src/BlogForm.flix)。同じ縁に `DbTest.runLogging` を
@@ -1765,20 +1823,26 @@ Tx のネストは未対応で、一部分の巻き戻しは `Tx.withSavepoint`�
 
 ### 失敗を値にしてよい所
 
-Tx の途中で失敗を値に潰すのが唯一気を付ける所で、`Ok` に見える `Result` は `withLazyTx` に COMMIT を
-出させるため。
-
 `Db.attempt(thunk)` は呼び出しごとに `Result` をくれる。バッチで 1 行ごとの結果を集める時に使う:
 
 ```flix
 rows |> List.map(row -> (row, Db.attempt(() -> UsersQueries.insertUser(row))))
 ```
 
-**`Db.attempt` は何も巻き戻さない。** `Err` がサーバ由来なら、PostgreSQL は既に Tx を aborted にして
-いて、後の SQL は全部 25P02 で失敗し、thunk が何を返しても `withLazyTx` は `DbErr.rollback` で返る。
-サーバに届かなかった失敗（`Rollback` / `DecodeError` / エフェクトで投げただけの物）なら Tx は生きていて、
-`Err` は普通の戻り値になって COMMIT される。どちらも意図した形ではないので、`Db.attempt` は Tx の外か
-`Pool.withConnection` の中で使う。Tx の**中**で失敗を値にしたいなら `Pool.withLazyTxResult`:
+```mermaid
+flowchart TD
+  q{"a failure inside the withLazyTx thunk:<br/>did it reach the server?"}
+  q -->|"yes: PostgreSQL has already marked the transaction aborted"| a["every later statement fails with 25P02,<br/>and withLazyTx returns DbErr.rollback<br/>whatever the thunk returned"]
+  q -->|"no: Rollback, DecodeError, an effect raised in your own code"| b["the transaction is still alive"]
+  b -->|"Db.attempt made it a value, so the thunk still returns Ok"| c["withLazyTx sends COMMIT"]
+  b -->|"Pool.withLazyTxResult reads the Err itself"| d["ROLLBACK, and that same Err comes back"]
+```
+
+失敗がサーバに届いたかどうかが、Tx の中の `Result` の意味を決める。値と巻き戻しを繋ぐのは
+`withLazyTxResult` だけ。
+
+**`Db.attempt` は何も巻き戻さない。** Tx の外か `Pool.withConnection` の中で使う。Tx の**中**で
+失敗を値にしたいなら `Pool.withLazyTxResult`:
 
 ```flix
 // RegisterErr（業務エラーのエフェクト）を Tx の中で受け、Err なら巻き戻す
