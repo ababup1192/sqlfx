@@ -40,3 +40,14 @@ def testNoWarningForAssignmentsAndSafeForms(): Unit \ Assert =
             lintCount("query c(role: Option[String]) -> many { SELECT id FROM users WHERE role IS NOT DISTINCT FROM :role }", "role"),
             lintCount("query d(since: Option[Timestamp]) -> many { SELECT id FROM users WHERE created_at >= :since }", "since")
         })
+
+/// `:param IS NULL OR col = :param` は None なら絞り込みを外す書き方なので注意しない。守っているのが別の引数なら注意する。
+///
+///   WHERE (:role IS NULL OR role = :role)   → 注意しない（注意書きが勧めている形）
+///   WHERE (:other IS NULL OR role = :role)  → 注意（role の None は守られていない）
+@Test
+def testNoWarningWhenGuardedByIsNull(): Unit \ Assert =
+    Assert.assertEq(
+        expected = ((0, false), (1, true)),
+        (lintCount("query a(role: Option[String]) -> many { SELECT id FROM users WHERE (:role IS NULL OR role = :role) }", "role"),
+         lintCount("query b(role: Option[String], other: Option[String]) -> many { SELECT id FROM users WHERE (:other IS NULL OR role = :role) }", "role")))

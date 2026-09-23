@@ -20,6 +20,7 @@ pub mod Sqlfx.Q.QLint {
     /// WHERE / ON / HAVING の `col = :param` に `Option` の引数を置いている所。
     /// SQL の `= NULL` は真でも偽でもなく NULL（＝その行は出ない）なので、None を渡した時だけ静かに 0 行になる。
     /// UPDATE の `SET col = :param` は NULL を書く正しい書き方なので数えない。
+    /// 前に同じ引数の `:param IS NULL OR` があれば、None で絞り込みを外す書き方なので数えない。
     ///
     def queryWarnings(queryDef: Query): List[String] =
         let (_, found) = List.foldLeft(step(queryDef), ("", Nil), queryDef#body);
@@ -34,10 +35,8 @@ pub mod Sqlfx.Q.QLint {
             case Segment.Text(text) => (sqlSoFar + text, found)
             case Segment.SlotRef(_) => (sqlSoFar, found)
             case Segment.ParamRef(name) =>
-                if (comparesForEquality(sqlSoFar) and inPredicate(sqlSoFar) and isOptional(queryDef, name))
-                    (sqlSoFar, message(queryDef#name, name) :: found)
-                else
-                    (sqlSoFar, found)
+                let warned = comparesForEquality(sqlSoFar) and inPredicate(sqlSoFar) and isOptional(queryDef, name) and not guardedByIsNull(sqlSoFar, name);
+                (sqlSoFar + ":${name}", if (warned) message(queryDef#name, name) :: found else found)
         }
 
     def message(queryName: String, paramName: String): String =
@@ -68,6 +67,17 @@ pub mod Sqlfx.Q.QLint {
                 case Some(_) => true
                 case None => false
             })
+
+    ///
+    /// ここまでに同じ引数の `:name IS NULL OR` があるか（大小文字と空白の違いは見ない）。
+    ///
+    /// WhyNot: 括弧の対応まで追って「同じ OR の中か」を見ない。守りが別の述語にある書き方は、同じ引数を 2 つの述語で
+    /// 使い分ける時だけで、その時に注意を 1 つ見落としても、None で 0 行になる不具合の形（守りが無い）は拾える。
+    ///
+    def guardedByIsNull(sql: String, name: String): Bool =
+        let words = SqlTokens.tokenize(sql) |> List.map(String.toUpperCase);
+        let guard = List#{":", String.toUpperCase(name), "IS", "NULL", "OR"};
+        List.exists(start -> List.take(List.length(guard), List.drop(start, words)) == guard, List.range(0, List.length(words)))
 
     def isOptional(queryDef: Query, name: String): Bool =
         queryDef#params |> List.exists(param -> param#name == name and param#optional)
