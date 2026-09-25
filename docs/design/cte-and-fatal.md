@@ -465,7 +465,7 @@ nextcms の `test/app/TestJvmCatchNesting.flix` の表に、scratchpad の spike
 | `run { try { run { op; throw } } }`（外へ op を通した run の中で throw） | **素通り** |
 | `run { try { op } } with handler { def op = throw }`（handler の本体が投げ、handler は try の外） | **素通り** |
 | handler の本体の中に try を置き、その中で JDBC を呼ぶ（thunk が外の handler に op を投げた後でも） | 拾える（spike S1-A / B / C2） |
-| handler の本体の try の中で `resume` を呼ぶ | **素通り**（spike S1-E。`resume` の先で thunk が投げた物は try に届かない） |
+| handler の本体の try の中で `resume` を呼ぶ | **形による**（spike S1-E は素通り）。`resume` の後で thunk が外の handler へ op を投げていれば素通り、投げていなければ本体の try が thunk の例外まで拾う（C1 の `TestCatchNesting` で 3 通りを実測。spike S1-E の「素通り」は前者の形にだけ当たる）。拾う時は利用側の例外を handler が飲み込むので、どちらにしても網にならない |
 
 ここから決まる事:
 
