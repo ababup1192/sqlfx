@@ -149,14 +149,15 @@ PG の決まりで確かめた事: 書き込みの CTE と本文は同じ snapsh
 ```
 QCte.split(words: List[String]): Result[CteError, Statement]
 
-Statement = { ctes = List[Cte], main = Unit }                          // WITH が無ければ ctes = Nil
-Cte       = { name = String, columns = Option[List[String]], body = Unit }
-Unit      = { words = List[String], start = Int32, end = Int32 }        // start / end は words 全体の中の位置
+Statement = { ctes = List[Cte], main = Part }                          // WITH が無ければ ctes = Nil
+Cte       = { name = String, columns = Option[List[String]], body = Part }
+Part      = { words = List[String], start = Int32, end = Int32 }        // start / end は words 全体の中の位置（end は含まない）
 ```
 
 - 文法は 1.2 の「WITH の判定」。`RECURSIVE` を見たら `RecursiveCte`
 - `name` は小文字にして持つ（PG は引用符の無い識別子を小文字に畳む）
 - `start` / `end` は slot の位置（1.7）を決めるのに使う
+- C7 で、型の名前を `Unit` から `Part` に変えた（Flix の `Unit` 型とぶつかる）。以下の節の「`Unit`」は `Part` と読む
 
 #### `QResolve.resolve`
 
@@ -233,6 +234,18 @@ UPDATE entries SET updated_at = now() WHERE project_id = :projectId AND id = ANY
 | R4. SELECT リストと文字列とコメント | どれも「縛る」に数えない |
 
 WITH の無い query には、今の粗い検査を残す。R1〜R4 を WITH の無い query にも当てるかは、nextcms の `queries/*.q` 全部に当てて止まる件数を数えてから決める（5 節の C7 の前の計測。今の `touchedTables` に `USING` とカンマの続きを足した時の件数も同じ計測で数える）。止まる件数が多ければ、止まった query を直す PR を nextcms 側で先に出し、sqlfx の次の minor で WITH の無い query にも当てる。
+
+**計測の結果（2026-09-25、C6 の字句の直しの後）。** nextcms の `queries/*.q` は 17 ファイル・271 query。`// unscoped:` の 22 を除いた 249 に当てた:
+
+| 検査 | 止まる query |
+|---|---|
+| (1) 今の検査（字句の直しの後） | 0。`make gen --check` も生成物の差分無し |
+| (2) (1) の `touchedTables` に `USING` とカンマの続きを足す | 0 |
+| (3) R1〜R4 | 1: `content_fields.q` の `listFieldsUsingCustomField`（`content_fields f` を `f.id = d.field_id` の結合だけで引き、`f.project_id` を縛っていない。1.8 の 2 番と同じ形で、誤検知ではない） |
+
+これで決めた事: WITH の無い query には 0.6.0 で (2) を当てる（止まる物が無く、1.1 の 2 つ目の素通りを塞ぐ）。(3) は 0.6.0 では WITH を含む query だけに当て、nextcms で `listFieldsUsingCustomField` を直した後の minor で WITH の無い query にも当てる。
+
+計測の R1〜R4 は、修飾の無いカラムを PG と同じく「参照を囲む副問い合わせの内側から外へ、そのカラムを持つ表」に解いた（INSERT の書き込み先は解く相手に入れない）。そうしないと `DELETE FROM entries WHERE id = ANY(ARRAY(SELECT id FROM entries WHERE project_id = :p)) AND project_id = :p` のような形を曖昧として止めてしまう（計測の最初の版で 2 件の誤検知が出た）。C9 の実装もこの解き方にする。
 
 #### 決め 3: `// unscoped:` は WITH を含む query では文を名指しする
 
