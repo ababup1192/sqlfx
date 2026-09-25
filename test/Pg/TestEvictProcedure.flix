@@ -3,8 +3,11 @@
 /// fatal を拾った所で接続を「evict だけして close しない」理由はこの表にある。
 ///
 ///   手順                                   close の結果            evict の後の本物の接続への protocol の呼び出し   active   次の借り
-///   1. evict → close（Tx の中で書いた後）   ok                      1（close が本物に ROLLBACK を送る）              0        新しい pid
-///   2. evict → close（Tx の中、書く前）     NullPointerException    0（fatal がこの NPE にすり替わる）               0        新しい pid
+///   1. evict → close（Tx の中で書いた後）   ok か NPE               1（close が本物に ROLLBACK を送る）              0        新しい pid
+///   2. evict → close（Tx の中、書く前）     ok か NPE               0                                                0        新しい pid
+///
+/// 1 と 2 の close の結果は、evict した物理接続を HikariCP が別のスレッドで閉じるのとの競りで ok と
+/// NullPointerException（PoolBase.resetConnectionState）のどちらにもなる。NPE の時は fatal がこの NPE にすり替わる。
 ///   3. 物理接続を閉じる → close（Tx の中）  PSQLException（閉じた） 1                                                0        新しい pid
 ///   4. evict だけ（Tx の中で書いた後）      -                       0                                                0        新しい pid
 ///   5. evict だけ（Tx の中、書く前）        -                       0                                                0        新しい pid
@@ -88,15 +91,16 @@ mod TestEvictProcedure {
             case Err(kind) => bug!("borrow に失敗: ${DbError.describe(kind)}")
         }
 
-    /// close を呼び、投げた物の class 名（投げなければ "ok"）。
+    /// close を呼び、投げた物の class 名。投げなければ "ok"。ok と NPE は HikariCP の close のスレッドとの競りで
+    /// どちらにもなるので、1 つの "ok or NPE" に読み替える。
     def closeOutcome(conn: Connection): String \ IO =
         try {
             conn.close();
-            "ok"
+            "ok or NPE"
         } catch {
             case error: Throwable =>
                 let name: String = error.getClass().getName();
-                name
+                if (name == "java.lang.NullPointerException") "ok or NPE" else name
         }
 
     /// HikariCP の proxy の下の、pgjdbc の物理接続を閉じる。
@@ -150,8 +154,8 @@ mod TestEvictProcedure {
         };
         Assert.assertEq(
             expected = List#{
-                ("ok", 1, 0, "new pid"),
-                ("java.lang.NullPointerException", 0, 0, "new pid"),
+                ("ok or NPE", 1, 0, "new pid"),
+                ("ok or NPE", 0, 0, "new pid"),
                 ("org.postgresql.util.PSQLException", 1, 0, "new pid"),
                 ("-", 0, 0, "new pid"),
                 ("-", 0, 0, "new pid"),
