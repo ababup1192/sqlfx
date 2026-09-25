@@ -5,6 +5,7 @@ pub mod Sqlfx.Db {
     use Sqlfx.TransientDbErr
 
     import java.lang.StackOverflowError
+    import java.lang.StackTraceElement
     import java.lang.Throwable
     import java.lang.VirtualMachineError
 
@@ -48,9 +49,10 @@ pub mod Sqlfx.Db {
         }
 
     ///
-    /// thunk を走らせ、Throwable を値にする。
+    /// thunk を走らせ、Throwable を値にする。fatal も値にするので、受けた側は `isFatal` を見て、fatal なら
+    /// 接続を始末（`Pool.evict`）してから投げ直す。自前の SqlRead / SqlWrite の handler の本体を包むのに使う。
     ///
-    def catchAll(thunk: Unit -> a \ ef): Result[Throwable, a] \ ef =
+    pub def catchAll(thunk: Unit -> a \ ef): Result[Throwable, a] \ ef =
         try {
             Ok(thunk())
         } catch {
@@ -59,6 +61,29 @@ pub mod Sqlfx.Db {
 
     ///
     /// 飲み込んではいけない物か。`VirtualMachineError`（OutOfMemoryError / InternalError）は true。
+    /// 例外自身と、cause の連鎖を深さ 8 まで見る。
+    ///
+    /// WhyNot: 一番外の例外だけを見ないのは、graphql-java や Future が中の OutOfMemoryError を
+    /// `CompletionException` に包んで投げ返し、外側だけ見ると fatal でない物として値にしてしまうため。
+    ///
+    pub def isFatal(error: Throwable): Bool \ IO =
+        isFatalWithin(error, 0)
+
+    ///
+    /// cause を辿る深さの上限。自分を cause に持つ物や長い連鎖で止まらなくならないように。
+    ///
+    def maxCauseDepth(): Int32 = 8
+
+    def isFatalWithin(error: Throwable, depth: Int32): Bool \ IO =
+        if (isFatalItself(error)) true
+        else {
+            let cause = error.getCause();
+            if (Object.isNull(cause) or depth >= maxCauseDepth()) false
+            else isFatalWithin(cause, depth + 1)
+        }
+
+    ///
+    /// その例外自体が fatal か（cause は見ない）。
     ///
     /// WhyNot: StackOverflowError を fatal にしないのは、VirtualMachineError の子ではあるが 1 つの Tx の深い再帰で
     /// 起きる物で、その Tx を巻き戻せば JVM は続けられるため。
@@ -66,7 +91,7 @@ pub mod Sqlfx.Db {
     /// WhyNot: `instanceof` でなく throw して catch で分けるのは、Flix に型の判定式が無く、catch の並びなら
     /// 子クラスを先に書けるため。
     ///
-    pub def isFatal(error: Throwable): Bool \ IO =
+    def isFatalItself(error: Throwable): Bool \ IO =
         try {
             throw error
         } catch {
@@ -74,6 +99,25 @@ pub mod Sqlfx.Db {
             case _: VirtualMachineError => true
             case _: Throwable           => false
         }
+
+    ///
+    /// pgjdbc の中から出た例外か。例外の class 名か、stack trace の先頭の frame の class 名が `org.postgresql.` で始まる物。
+    /// fatal でなくても、pgjdbc の中の例外は protocol の途中で出うるので、その接続は捨てる（ROLLBACK を送らない）。
+    ///
+    /// WhyNot: fatal でない例外を全部「接続を捨てる」側に倒さないのは、sqlfx 側の変換（JdbcConvert）の失敗は
+    /// 接続の protocol に触っておらず、ROLLBACK して返せば足りるため。
+    ///
+    pub def fromDriver(error: Throwable): Bool \ IO =
+        let className: String = error.getClass().getName();
+        let frames = error.getStackTrace();
+        let topFrame: String = if (Array.length(frames) == 0) "" else { let frame: StackTraceElement = Array.get(0, frames); frame.getClassName() };
+        isDriverClass(className) or isDriverClass(topFrame)
+
+    ///
+    /// pgjdbc の class 名か。
+    ///
+    def isDriverClass(name: String): Bool =
+        String.startsWith(prefix = "org.postgresql.", name)
 
     ///
     /// 例外の 1 行。message があればそれ、null ならクラス名（VerifyError は message が null の事がある）。
