@@ -30,6 +30,21 @@ pub mod Sqlfx.Q.QRender {
         (List.reverse(parts) |> List.join(""), List.reverse(names))
 
     ///
+    /// `{slot}` の置き文字が、`toAnnotatedSql` の SQL を `SqlTokens.tokenize` した語の並びの何番目から始まるか（slot 名, 位置）。
+    /// WITH を含む query で、slot がどの文にあるかを決めるのに使う。
+    ///
+    pub def slotPositions(queryDef: Query): List[(String, Int32)] =
+        let (_, positions) = List.foldLeft((state, segment) -> {
+            let (sqlSoFar, found) = state;
+            match segment {
+                case Segment.Text(text)     => (sqlSoFar + text, found)
+                case Segment.ParamRef(_)    => (sqlSoFar + "$0", found)
+                case Segment.SlotRef(name)  => (sqlSoFar + slotPlaceholder(queryDef, name), (name, List.length(SqlTokens.tokenize(sqlSoFar))) :: found)
+            }
+        }, ("", Nil), queryDef#body);
+        List.reverse(positions)
+
+    ///
     /// 1 断片を文字列にし、`:name` なら引数名の並びも更新する。並びは逆順で持つ。
     ///
     def step(queryDef: Query, state: (List[String], List[String]), segment: Segment): (List[String], List[String]) =

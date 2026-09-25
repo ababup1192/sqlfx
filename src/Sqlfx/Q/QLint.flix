@@ -1,9 +1,11 @@
 ///
 /// 生成は止めないが、まず間違いなく意図と違う書き方を拾う（design.md §3 の「SQL はそのまま通す」方針なので、書き換えはしない）。
-/// 今のところ `Option` の引数を述語の `=` の右に置いた query だけ。
+/// `Option` の引数を述語の `=` の右に置いた query と、読まれない SELECT の CTE。
 ///
 pub mod Sqlfx.Q.QLint {
 
+    use Sqlfx.Q.QCte
+    use Sqlfx.Q.QRender
     use Sqlfx.Q.QueryDef
     use Sqlfx.Q.SqlTokens
 
@@ -14,7 +16,25 @@ pub mod Sqlfx.Q.QLint {
     /// 全 query の注意書き。1 件 1 行で、gen が `warning:` を付けて表示する。
     ///
     pub def warnings(queries: List[Query]): List[String] =
-        List.flatMap(queryWarnings, queries)
+        List.flatMap(queryDef -> queryWarnings(queryDef) ::: unusedCtes(queryDef), queries)
+
+    ///
+    /// 後ろの CTE にも本文にも名前が出ない SELECT の CTE。PG は参照されない SELECT の CTE を実行しない。
+    /// 書き込みの CTE は参照されなくても実行されるので数えない。WITH を切れない query（QResolve が断る物）は何も言わない。
+    ///
+    def unusedCtes(queryDef: Query): List[String] =
+        let (sql, _) = QRender.toSql(queryDef);
+        match QCte.split(SqlTokens.tokenize(sql)) {
+            case Err(_) => Nil
+            case Ok(statement) =>
+                let later = (index: Int32) -> List.flatten(List.drop(index + 1, List.map(cte -> cte#body#words, statement#ctes)) ::: (statement#main#words :: Nil));
+                statement#ctes
+                    |> List.zipWithIndex
+                    |> List.filter(match (index, cte) ->
+                        (List.head(cte#body#words) |> Option.map(String.toUpperCase)) == Some("SELECT")
+                            and not List.exists(word -> String.toLowerCase(word) == cte#name, later(index)))
+                    |> List.map(match (_, cte) -> "query ${queryDef#name}: CTE ${cte#name} is a SELECT that nothing reads. PostgreSQL does not run it; read it in FROM or remove it")
+        }
 
     ///
     /// WHERE / ON / HAVING の `col = :param` に `Option` の引数を置いている所。

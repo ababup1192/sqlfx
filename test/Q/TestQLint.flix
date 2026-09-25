@@ -51,3 +51,26 @@ def testNoWarningWhenGuardedByIsNull(): Unit \ Assert =
         expected = ((0, false), (1, true)),
         (lintCount("query a(role: Option[String]) -> many { SELECT id FROM users WHERE (:role IS NULL OR role = :role) }", "role"),
          lintCount("query b(role: Option[String], other: Option[String]) -> many { SELECT id FROM users WHERE (:other IS NULL OR role = :role) }", "role")))
+
+/// 本文から読まれない SELECT の CTE は警告する（PG はそれを実行しない）。読まれない書き込みの CTE は警告しない（PG は実行する）。
+///
+///   WITH a AS (SELECT …) SELECT 2           → 警告（a を誰も読まない）
+///   WITH a AS (SELECT …) SELECT x FROM a    → 無し
+///   WITH w AS (UPDATE …) SELECT 1           → 無し（書き込みの CTE）
+///   WITH a AS (SELECT …), b AS (SELECT … FROM a) SELECT … FROM b → 無し（a は b が読む）
+@Test
+def testUnusedSelectCte(): Unit \ Assert =
+    let warningsOf = source -> QParser.parseFile(source) |> Result.map(QLint.warnings) |> Result.getWithDefault(List#{"parse error"});
+    Assert.assertEq(
+        expected = List#{
+            List#{"query a: CTE a is a SELECT that nothing reads. PostgreSQL does not run it; read it in FROM or remove it"},
+            Nil,
+            Nil,
+            Nil
+        },
+        List#{
+            warningsOf("query a() -> many { WITH a AS (SELECT 1::int AS x) SELECT 2::int AS y }"),
+            warningsOf("query b() -> many { WITH a AS (SELECT 1::int AS x) SELECT x FROM a }"),
+            warningsOf("query c(n: String) -> many { WITH w AS (UPDATE users SET name = :n RETURNING id) SELECT 1::int AS y }"),
+            warningsOf("query d() -> many { WITH a AS (SELECT 1::int AS x), b AS (SELECT x FROM a) SELECT x FROM b }")
+        })

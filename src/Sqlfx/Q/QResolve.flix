@@ -9,6 +9,7 @@
 ///
 pub mod Sqlfx.Q.QResolve {
 
+    use Sqlfx.Q.QCte
     use Sqlfx.Q.QRender
     use Sqlfx.Q.QueryDef
     use Sqlfx.Q.Schema
@@ -40,12 +41,56 @@ pub mod Sqlfx.Q.QResolve {
         case UnsupportedStatement(String, String)
         /// (クエリ名, 列名) keyed の列が結果に無い
         case KeyedNotInResult(String, String)
-        /// (クエリ名, slot 名, テーブル名) slot のテーブルが FROM に無い
-        case SlotTableNotInFrom(String, String, String)
+        /// (クエリ名, slot 名, テーブル名) slot のテーブルが、その slot を含む文の FROM に無い
+        case SlotTableNotInStatement(String, String, String)
         /// (クエリ名, slot 名) Changes は exec にだけ置ける
         case ChangesSlotRequiresExec(String, String)
         /// (クエリ名, slot 名, テーブル名) Changes のテーブルが UPDATE の対象でない
         case ChangesSlotNotUpdateTarget(String, String, String)
+        /// (クエリ名, CTE 名) WITH RECURSIVE
+        case RecursiveCte(String, String)
+        /// (クエリ名) CTE の本文か副問い合わせの中の WITH
+        case NestedWith(String)
+        /// (クエリ名, CTE 名) 同じ名前の CTE が 2 つ
+        case DuplicateCte(String, String)
+        /// (クエリ名, CTE 名) 表と同じ名前の CTE
+        case CteShadowsTable(String, String)
+        /// (クエリ名) main という名前の CTE
+        case ReservedCteName(String)
+        /// (クエリ名, CTE 名, 並べた数, 文が返す数) CTE のカラムの並びの数が合わない
+        case CteColumnCount(String, String, Int32, Int32)
+        /// (クエリ名, CTE 名) RETURNING の無い書き込みの CTE を FROM で読んだ
+        case CteWithoutReturning(String, String)
+        /// (クエリ名, 表, 先の文, 後の文) 同じ表を 2 つの文で書く
+        case SameTableWrittenTwice(String, String, String, String)
+        /// (クエリ名, slot 名) WITH を含む query の Changes
+        case ChangesSlotWithCte(String, String)
+    }
+
+    ///
+    /// エラーを、規則・受け取った値・直し方の分かる 1 line にする。
+    ///
+    pub def describe(error: ResolveError): String = match error {
+        case ResolveError.UnknownTable(queryName, table) => "query ${queryName} reads table ${table}, which is not in the migrations (or is a CTE defined later). Create the table, fix the name, or move the CTE before the one that reads it"
+        case ResolveError.UnknownColumn(queryName, column) => "query ${queryName} reads column ${column}, which none of its tables has. Fix the name, or add the column in a migration"
+        case ResolveError.AmbiguousColumn(queryName, column) => "column ${column} of query ${queryName} is in more than one of its tables. Qualify it with the table or its label"
+        case ResolveError.UnsupportedColumnType(queryName, column) => "column ${column} of query ${queryName} has a type the generator does not map. Cast it, like ${column}::text AS ${column}"
+        case ResolveError.UntypedColumn(queryName, expression) => "the type of `${expression}` in query ${queryName} is not known. Write it as `expr::type AS name`"
+        case ResolveError.MisplacedNotNullMark(queryName, expression) => "the NOT NULL mark `!` in `${expression}` of query ${queryName} is not right after a cast. Write it as `expr::type! AS name`"
+        case ResolveError.UnsupportedStatement(queryName, word) => "query ${queryName} starts its statement with ${word}, which does not fit its shape: one / many take a SELECT or a write with RETURNING, exec takes a write without RETURNING"
+        case ResolveError.KeyedNotInResult(queryName, column) => "query ${queryName} is keyed(${column}), but ${column} is not in its result. Select the column, or fix the name in keyed(...)"
+        case ResolveError.SlotTableNotInStatement(queryName, slot, table) => "slot ${slot} of query ${queryName} is Pred[${table}], but ${table} is not in the FROM of the statement that holds {${slot}}"
+        case ResolveError.ChangesSlotRequiresExec(queryName, slot) => "slot ${slot} of query ${queryName} is Changes, which only an exec query can hold. Make the query exec"
+        case ResolveError.ChangesSlotNotUpdateTarget(queryName, slot, table) => "slot ${slot} of query ${queryName} is Changes[${table}], but ${table} is not the table the UPDATE writes. Name the UPDATE's table in Changes[...]"
+        case ResolveError.RecursiveCte(queryName, cte) => "query ${queryName} uses WITH RECURSIVE (CTE ${cte}), which the generator does not type. Put the recursive part in a SQL function and SELECT from it, or run it with RawSql"
+        case ResolveError.NestedWith(queryName) => "query ${queryName} has a WITH inside a CTE or a subquery. The generator reads only the WITH at the start of the query; move the inner CTEs up into it"
+        case ResolveError.DuplicateCte(queryName, cte) => "query ${queryName} defines CTE ${cte} twice. Rename one of them"
+        case ResolveError.CteShadowsTable(queryName, cte) => "CTE ${cte} in query ${queryName} has the name of a table. Rename the CTE: PostgreSQL reads FROM ${cte} as the CTE but UPDATE ${cte} as the table, and the scope check needs one meaning"
+        case ResolveError.ReservedCteName(queryName) => "query ${queryName} names a CTE main, which is how // unscoped: points at the main statement. Rename the CTE"
+        case ResolveError.CteColumnCount(queryName, cte, declared, actual) => "CTE ${cte} in query ${queryName} names ${declared} columns, but its statement returns ${actual}. Make the list after the CTE name match the statement's columns"
+        case ResolveError.CteWithoutReturning(queryName, cte) => "query ${queryName} reads CTE ${cte}, which writes without RETURNING, so it has no columns. Add RETURNING <columns> to CTE ${cte}"
+        case ResolveError.SameTableWrittenTwice(queryName, table, first, second) => "query ${queryName} writes table ${table} in both ${first} and ${second}. PostgreSQL applies only one of two changes to the same row in one statement (the manual, 7.8.4), so one of them would be lost without an error. Merge them into one statement, or split the query"
+        case ResolveError.ChangesSlotWithCte(queryName, slot) => "slot ${slot} of query ${queryName} is Changes, which cannot be used in a query with WITH: when the changes are empty the whole statement is skipped, and so are the other CTEs' writes. Split the query"
     }
 
     ///
@@ -75,21 +120,157 @@ pub mod Sqlfx.Q.QResolve {
     pub def resolve(schema: Schema, queryDef: Query): Result[ResolveError, Resolved] =
         let (sql, _) = QRender.toAnnotatedSql(queryDef);
         let words = SqlTokens.tokenize(sql);
-        let firstWord = List.head(words) |> Option.getWithDefault("") |> String.toUpperCase;
-        let unsupported = ResolveError.UnsupportedStatement(queryDef#name, firstWord);
         forM (
-            kind <- classifyStatement(words) |> Option.toOk(unsupported);
-            _ <- if (shapeFits(queryDef#shape, kind)) Ok(()) else Err(unsupported);
-            sources <- collectSources(queryDef#name, schema, words);
+            statement <- QCte.split(words) |> Result.mapErr(cteError(queryDef#name));
+            resolved <- if (List.isEmpty(statement#ctes)) resolvePlain(schema, queryDef, words) else resolveWith(schema, queryDef, statement)
+        ) yield resolved
+
+    ///
+    /// WITH の無い query。
+    ///
+    def resolvePlain(schema: Schema, queryDef: Query, words: List[String]): Result[ResolveError, Resolved] =
+        let firstWord = List.head(words) |> Option.getWithDefault("") |> String.toUpperCase;
+        forM (
+            resolution <- resolveStatement(queryDef#name, schema, words);
+            _ <- if (shapeFits(queryDef#shape, resolution#kind)) Ok(()) else Err(ResolveError.UnsupportedStatement(queryDef#name, firstWord));
+            _ <- checkKeyed(queryDef, resolution#columns);
+            _ <- checkSlots(queryDef, _ -> resolution#sources);
+            _ <- checkChangesSlots(queryDef, firstWord, resolution#sources)
+        ) yield { queryDef = queryDef, columns = resolution#columns, writes = isWrite(resolution#kind) }
+
+    ///
+    /// 1 つの文を解決した結果。
+    ///
+    type alias Resolution = { kind = StatementKind, sources = List[Source], columns = List[ResultColumn] }
+
+    ///
+    /// 1 つの文（CTE の本文か本文）を解決する。書き込みの RETURNING は、PG と同じく INSERT なら書き込み先だけ、
+    /// UPDATE / DELETE なら書き込み先と FROM / USING の後ろから引く。
+    ///
+    def resolveStatement(queryName: String, schema: Schema, words: List[String]): Result[ResolveError, Resolution] =
+        let firstWord = List.head(words) |> Option.getWithDefault("") |> String.toUpperCase;
+        forM (
+            kind <- classifyStatement(words) |> Option.toOk(ResolveError.UnsupportedStatement(queryName, firstWord));
+            sources <- collectSources(queryName, schema, words);
             columns <- match kind {
-                case StatementKind.Select(listWords) => resolveColumnList(queryDef#name, sources, listWords)
-                case StatementKind.WriteReturning(listWords) => resolveColumnList(queryDef#name, sources, listWords)
+                case StatementKind.Select(listWords) => resolveColumnList(queryName, sources, listWords)
+                case StatementKind.WriteReturning(listWords) => resolveColumnList(queryName, returningSources(firstWord, sources), listWords)
                 case StatementKind.Write => Ok(Nil)
-            };
-            _ <- checkKeyed(queryDef, columns);
-            _ <- checkSlots(queryDef, sources);
-            _ <- checkChangesSlots(queryDef, firstWord, sources)
-        ) yield { queryDef = queryDef, columns = columns, writes = isWrite(kind) }
+            }
+        ) yield { kind = kind, sources = sources, columns = columns }
+
+    def returningSources(firstWord: String, sources: List[Source]): List[Source] =
+        if (firstWord == "INSERT") List.take(1, sources) else sources
+
+    ///
+    /// WITH を含む query。CTE を前から 1 つずつ、それより前の CTE を仮想の表にしたスキーマで解決し、最後に本文を解決する。
+    ///
+    def resolveWith(schema: Schema, queryDef: Query, statement: QCte.Statement): Result[ResolveError, Resolved] =
+        let name = queryDef#name;
+        let firstWord = List.head(statement#main#words) |> Option.getWithDefault("") |> String.toUpperCase;
+        forM (
+            _ <- checkCteNames(name, schema, statement#ctes);
+            _ <- queryDef#slots |> List.find(slot -> slot#kind == SlotKind.Changes) |> Option.map(slot -> ResolveError.ChangesSlotWithCte(name, slot#name)) |> toErr;
+            done <- Result.foldLeftM(resolveCte(name), { schema = schema, withoutReturning = Nil, statements = Nil }, statement#ctes);
+            _ <- readsWithoutReturning(name, done#withoutReturning, statement#main#words);
+            mainKind <- classifyStatement(statement#main#words) |> Option.toOk(ResolveError.UnsupportedStatement(name, firstWord));
+            mainSources <- collectSources(name, done#schema, statement#main#words);
+            // 同じ表を 2 つの文で書く件は、本文の列の解決より先に出す（本文が SELECT 1 のような形でも、先に気づかせたいのはこちら）
+            _ <- sameTableWrittenTwice(name, List.reverse(done#statements) ::: ("main", statement#main, { kind = mainKind, sources = mainSources, columns = Nil }) :: Nil);
+            main <- resolveStatement(name, done#schema, statement#main#words);
+            _ <- if (shapeFits(queryDef#shape, main#kind)) Ok(()) else Err(ResolveError.UnsupportedStatement(name, firstWord));
+            _ <- checkKeyed(queryDef, main#columns);
+            _ <- checkSlots(queryDef, position -> sourcesAt(position, List.reverse(done#statements) ::: ("main", statement#main, main) :: Nil))
+        ) yield {
+            queryDef = queryDef,
+            columns = main#columns,
+            writes = isWrite(main#kind) or List.exists(match (_, _, resolution) -> isWrite(resolution#kind), done#statements)
+        }
+
+    ///
+    /// CTE を解決していく途中の状態。`statements` は解決した CTE（名前, 位置, 結果。逆順）。
+    ///
+    type alias CteState = { schema = Schema, withoutReturning = List[String], statements = List[(String, QCte.Part, Resolution)] }
+
+    ///
+    /// CTE を 1 つ解決して、仮想の表として足す。RETURNING の無い書き込みの CTE はカラム 0 個の表にし、読まれた所で断る。
+    ///
+    def resolveCte(queryName: String, state: CteState, cte: QCte.Cte): Result[ResolveError, CteState] =
+        forM (
+            _ <- readsWithoutReturning(queryName, state#withoutReturning, cte#body#words);
+            resolution <- resolveStatement(queryName, state#schema, cte#body#words);
+            columns <- renameCteColumns(queryName, cte, resolution#columns)
+        ) yield {
+            let table = { name = cte#name, columns = List.map(column -> { name = column#name, columnType = Some(column#columnType), nullable = column#nullable }, columns), constraints = Nil };
+            let silent = match resolution#kind { case StatementKind.Write => cte#name :: state#withoutReturning case _ => state#withoutReturning };
+            { schema = Schema.addTable(table, state#schema), withoutReturning = silent, statements = (cte#name, cte#body, resolution) :: state#statements }
+        }
+
+    ///
+    /// `WITH w(a, b) AS (…)` のカラムの並びで、位置ごとに名前を付け替える。数が違えば CteColumnCount。
+    ///
+    def renameCteColumns(queryName: String, cte: QCte.Cte, columns: List[ResultColumn]): Result[ResolveError, List[ResultColumn]] =
+        match cte#columns {
+            case None => Ok(columns)
+            case Some(names) if List.length(names) != List.length(columns) => Err(ResolveError.CteColumnCount(queryName, cte#name, List.length(names), List.length(columns)))
+            case Some(names) => Ok(List.zip(names, columns) |> List.map(match (renamed, column) -> { name = renamed | column }))
+        }
+
+    ///
+    /// CTE の名前: 同じ名前が 2 つ、表の名前と同じ、`main`（`// unscoped:` で本文を指す語）を断る。
+    ///
+    def checkCteNames(queryName: String, schema: Schema, ctes: List[QCte.Cte]): Result[ResolveError, Unit] =
+        let names = List.map(cte -> cte#name, ctes);
+        let duplicate = names |> List.zipWithIndex |> List.find(match (index, cteName) -> List.memberOf(cteName, List.take(index, names))) |> Option.map(snd);
+        match (duplicate, List.find(cteName -> Option.nonEmpty(Schema.findTable(cteName, schema)), names), List.memberOf("main", names)) {
+            case (Some(cteName), _, _) => Err(ResolveError.DuplicateCte(queryName, cteName))
+            case (_, Some(cteName), _) => Err(ResolveError.CteShadowsTable(queryName, cteName))
+            case (_, _, true) => Err(ResolveError.ReservedCteName(queryName))
+            case _ => Ok(())
+        }
+
+    ///
+    /// RETURNING の無い書き込みの CTE を FROM / JOIN で読んでいれば CteWithoutReturning（深さを問わない）。
+    ///
+    /// WhyNot: カラム 0 個の表として黙って通さないのは、`*` で読むと空になるだけで気づけないため。
+    ///
+    def readsWithoutReturning(queryName: String, withoutReturning: List[String], words: List[String]): Result[ResolveError, Unit] =
+        List.zip(words, List.drop(1, words))
+            |> List.find(match (keyword, cteName) -> List.memberOf(String.toUpperCase(keyword), List#{"FROM", "JOIN"}) and List.memberOf(String.toLowerCase(cteName), withoutReturning))
+            |> Option.map(match (_, cteName) -> ResolveError.CteWithoutReturning(queryName, String.toLowerCase(cteName)))
+            |> toErr
+
+    ///
+    /// 書き込みの文を並べ、書き込み先の表が 2 つ以上の文で重なれば SameTableWrittenTwice。
+    ///
+    def sameTableWrittenTwice(queryName: String, statements: List[(String, QCte.Part, Resolution)]): Result[ResolveError, Unit] =
+        let targets = statements |> List.filterMap(match (label, _, resolution) ->
+            if (isWrite(resolution#kind)) List.head(resolution#sources) |> Option.map(source -> (source#table#name, label)) else None);
+        targets
+            |> List.zipWithIndex
+            |> List.findMap(match (index, (table, label)) ->
+                List.take(index, targets) |> List.find(match (earlier, _) -> earlier == table) |> Option.map(match (_, first) -> ResolveError.SameTableWrittenTwice(queryName, table, first, label)))
+            |> toErr
+
+    ///
+    /// 語の位置を含む文の FROM の表。slot の置き文字の位置から、その slot を含む文を決めるのに使う。
+    ///
+    def sourcesAt(position: Int32, statements: List[(String, QCte.Part, Resolution)]): List[Source] =
+        statements
+            |> List.find(match (_, part, _) -> part#start <= position and position <= part#end)
+            |> Option.map(match (_, _, resolution) -> resolution#sources)
+            |> Option.getWithDefault(Nil)
+
+    def cteError(queryName: String, error: QCte.CteError): ResolveError = match error {
+        case QCte.CteError.RecursiveCte(cteName) => ResolveError.RecursiveCte(queryName, cteName)
+        case QCte.CteError.NestedWith => ResolveError.NestedWith(queryName)
+        case QCte.CteError.Unexpected(detail) => ResolveError.UnsupportedStatement(queryName, "WITH (${detail})")
+    }
+
+    def toErr(error: Option[ResolveError]): Result[ResolveError, Unit] = match error {
+        case Some(e) => Err(e)
+        case None => Ok(())
+    }
 
     ///
     /// 先頭の語で種類を決める。書き込みは深さ 0 に RETURNING があれば列を返す。
@@ -142,7 +323,20 @@ pub mod Sqlfx.Q.QResolve {
     /// FROM / JOIN / UPDATE / INSERT INTO / DELETE FROM の後ろのテーブルを集める。カンマ区切りの FROM も追う。
     ///
     def collectSources(queryName: String, schema: Schema, words: List[String]): Result[ResolveError, List[Source]] =
-        sourceLoop(queryName, schema, words, Nil, "", 0)
+        let deleting = List.head(words) |> Option.exists(word -> String.toUpperCase(word) == "DELETE");
+        sourceLoop(queryName, schema, if (deleting) markUsing(words) else words, Nil, "", 0)
+
+    ///
+    /// DELETE の深さ 0 の USING を FROM と同じに読むため、印の語に置き換える。JOIN ... USING (col) の USING は触らない（深さ 0 でも `(` が続く）。
+    ///
+    def markUsing(words: List[String]): List[String] =
+        let (marked, _) = List.foldLeft((acc, pair) -> {
+            let (done, depth) = acc;
+            let (word, next) = pair;
+            let nextDepth = if (word == "(") depth + 1 else if (word == ")") depth - 1 else depth;
+            if (depth == 0 and String.toUpperCase(word) == "USING" and next != "(") ("FROM" :: done, nextDepth) else (word :: done, nextDepth)
+        }, (Nil, 0), List.zip(words, List.drop(1, words) ::: "" :: Nil));
+        List.reverse(marked)
 
     ///
     /// `previous` は 1 つ前の語（大文字）。深さ 0 の FROM / JOIN / INTO / UPDATE の直後をテーブルとして読む。
@@ -178,7 +372,7 @@ pub mod Sqlfx.Q.QResolve {
             case name :: "(" :: rest if mode#functionAllowed and isIdentifier(name) => sourceLoop(queryName, schema, "(" :: rest, acc, "SUBQUERY", 0)
             case name :: rest =>
                 let (label, afterAlias) = readAlias(rest);
-                match Schema.findTable(name, schema) {
+                match (match Schema.findTable(name, schema) { case Some(found) => Some(found) case None => Schema.findTable(String.toLowerCase(name), schema) }) {
                     case Some(table) => sourceLoop(queryName, schema, afterAlias, { table = table, label = label, nullable = mode#nullable } :: acc, "SOURCE", 0)
                     case None => Err(ResolveError.UnknownTable(queryName, name))
                 }
@@ -355,10 +549,17 @@ pub mod Sqlfx.Q.QResolve {
             case _ => Ok(())
         }
 
-    def checkSlots(queryDef: Query, sources: List[Source]): Result[ResolveError, Unit] =
+    ///
+    /// slot の表が、その `{slot}` を含む文の FROM に在るか。`sourcesAt` は slot の置き文字の位置 → その文の表。
+    ///
+    def checkSlots(queryDef: Query, sourcesAt: Int32 -> List[Source]): Result[ResolveError, Unit] =
+        let positions = QRender.slotPositions(queryDef);
         queryDef#slots
-            |> List.find(slot -> not List.exists(source -> source#table#name == slot#table, sources))
-            |> Option.map(slot -> ResolveError.SlotTableNotInFrom(queryDef#name, slot#name, slot#table))
+            |> List.find(slot -> {
+                let position = List.find(match (slotName, _) -> slotName == slot#name, positions) |> Option.map(snd) |> Option.getWithDefault(0);
+                not List.exists(source -> source#table#name == slot#table, sourcesAt(position))
+            })
+            |> Option.map(slot -> ResolveError.SlotTableNotInStatement(queryDef#name, slot#name, slot#table))
             |> (missing -> match missing { case Some(e) => Err(e) case None => Ok(()) })
 
     ///

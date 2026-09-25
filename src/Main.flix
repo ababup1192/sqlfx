@@ -244,7 +244,7 @@ mod Gen {
             queries <- QParser.parseFile(source) |> Result.mapErr(e -> "${path}: ${e}");
             _ <- Ok(List.forEach(warning -> println("warning: ${path}: ${warning}"), QLint.warnings(queries)));
             injections <- QScope.plan(scopes, schema, source, queries) |> Result.mapErr(e -> "${path}: ${QScope.describe(e)}");
-            resolved <- Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(e -> "${path}: ${e}");
+            resolved <- Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(e -> "${path}: ${QResolve.describe(e)}");
             code <- Codegen.renderQueriesWith({ fileName = fileName, source = source }, injections, resolved) |> Result.mapErr(e -> "${path}: ${e}")
         ) yield ("${outDir}/${Codegen.moduleNameOf(fileName)}.flix", code)
 
