@@ -245,6 +245,8 @@ WITH の無い query には、今の粗い検査を残す。R1〜R4 を WITH の
 
 これで決めた事: WITH の無い query には 0.6.0 で (2) を当てる（止まる物が無く、1.1 の 2 つ目の素通りを塞ぐ）。(3) は 0.6.0 では WITH を含む query だけに当て、nextcms で `listFieldsUsingCustomField` を直した後の minor で WITH の無い query にも当てる。
 
+**0.7.0 で閉じた（2026-09-25）。** nextcms で `listFieldsUsingCustomField` に `f.project_id = d.project_id` を足した後、WITH の無い query にも R1〜R4 を当てた。nextcms の `queries/*.q` で止まる物は 0。同じ時に、外側と副問い合わせに同じ表を alias 無しで置くと label が同じになり、外側を縛っただけで副問い合わせの表も縛った事になっていた（上の表の 7 番が WITH の中でも通っていた）のを、表を (label, 置いた副問い合わせ) で見分けるように直した。
+
 計測の R1〜R4 は、修飾の無いカラムを PG と同じく「参照を囲む副問い合わせの内側から外へ、そのカラムを持つ表」に解いた（INSERT の書き込み先は解く相手に入れない）。そうしないと `DELETE FROM entries WHERE id = ANY(ARRAY(SELECT id FROM entries WHERE project_id = :p)) AND project_id = :p` のような形を曖昧として止めてしまう（計測の最初の版で 2 件の誤検知が出た）。C9 の実装もこの解き方にする。
 
 #### 決め 3: `// unscoped:` は WITH を含む query では文を名指しする

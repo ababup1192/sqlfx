@@ -8,12 +8,9 @@
 /// 列を書けばその列だけ、省けば `--scope` の全部の列に効く。印と `query` の間には普通の `//` コメントと空行を挟んでよい。
 /// それ以外の行やファイル末尾に当たった印は dangling として生成を止める。
 ///
-/// WITH の無い query は「列の名前が本文に 1 度も出ない」事だけを見る（粗い検査）。WITH を含む query は、CTE の本文 1 つずつと
-/// 本文を単位に、表ごとに列が引数（か、引数に縛られた表の列）と比べられているかを見る（R1〜R4。設計 docs/design/cte-and-fatal.md の 1.8）。
+/// 表ごとに列が引数（か、引数に縛られた表の列）と比べられているかを見る（R1〜R4。設計 docs/design/cte-and-fatal.md の 1.8）。
+/// WITH を含む query は CTE の本文 1 つずつと本文を単位に、WITH の無い query は文全体を 1 つの単位に見る。
 /// WITH を含む query の `// unscoped:` は、免除する文を `// unscoped: [列] in <CTE の名前 | main>[, ...] 理由` で名指しする。
-///
-/// WhyNot: WITH の無い query に R1〜R4 を当てないのは、nextcms の query に当てて 1 つ止まる事を測ったため（設計の 1.8 の計測）。
-/// 止まる query を直した後の minor で当てる。
 /// WhyNot: 注入する引数を「列の camelCase で必須の Int64」に限るのは、値の式が `<effect>.currentId()` に固定で、
 /// 別名の引数まで拾うと `IN (...)` の配列や JOIN の相手の id を取り違えるため。名前だけ合って型が違う物はエラーにして気づかせる。
 ///
@@ -48,7 +45,7 @@ pub mod Sqlfx.Q.QScope {
     pub type alias Injection = { param = String, effect = String }
 
     pub enum ScopeError with Eq, Order, ToString {
-        /// (クエリ名, テーブル名, 列名) その表を触るのに列の条件が無く、`// unscoped:` の印も無い
+        /// (クエリ名, テーブル名, 列名) その表の列が引数（か、縛られた表の列）と比べられておらず、`// unscoped:` の marker も無い
         case Unscoped(String, String, String)
         /// (印の行番号。1 始まり) 印の後に `query` が来ないまま、コメントでも空行でもない行かファイル末尾に当たった
         case DanglingMarker(Int32)
@@ -71,7 +68,7 @@ pub mod Sqlfx.Q.QScope {
     ///
     pub def describe(error: ScopeError): String = match error {
         case ScopeError.Unscoped(name, table, column) =>
-            "query ${name} touches ${table} with no condition on ${column}. If that is intended, write `// unscoped: <reason>` on the line before the query"
+            "query ${name} touches ${table} with no condition that ties ${table}.${column} to a parameter. Compare it with a parameter, join it to a table that is, or, if that is intended, write `// unscoped: <reason>` on the line before the query"
         case ScopeError.DanglingMarker(at) =>
             "the marker on line ${at} (`// unscoped:` / `// scope: explicit`) is not followed by a query. Put the marker before the query; only `//` comments and blank lines may come between"
         case ScopeError.UnknownMarkedQuery(name) =>
@@ -280,12 +277,9 @@ pub mod Sqlfx.Q.QScope {
     ///
     def violation(column: String, schema: Schema, queryDef: Query): Option[ScopeError] =
         let (sql, _) = QRender.toSql(queryDef);
-        let words = SqlTokens.tokenize(sql);
-        if (List.exists(word -> String.toLowerCase(word) == column, words)) None
-        else
-            scopedTables(column, schema, queryDef)
-                |> List.head
-                |> Option.map(table -> ScopeError.Unscoped(queryDef#name, table, column))
+        strictViolations(column, schema, SqlTokens.tokenize(sql))
+            |> List.head
+            |> Option.map(table -> ScopeError.Unscoped(queryDef#name, table, column))
 
     ///
     /// query が触る表のうち、列を持つ物。
@@ -390,7 +384,7 @@ pub mod Sqlfx.Q.QScope {
         let bound = boundLabels(column, schema, all, words);
         let unbound = all
             |> List.filter(touch -> hasColumn(column, schema, touch#table))
-            |> List.filter(touch -> if (touch#insertTarget) not insertBound(column, schema, all, bound, words, touch) else not Set.memberOf(touch#label, bound));
+            |> List.filter(touch -> if (touch#insertTarget) not insertBound(column, schema, all, bound, words, touch) else not Set.memberOf(keyOf(touch), bound));
         let (targets, sources) = List.partition(touch -> touch#insertTarget, unbound);
         (sources ::: targets) |> List.map(touch -> touch#table) |> List.distinct
 
@@ -475,17 +469,27 @@ pub mod Sqlfx.Q.QScope {
         if (next == bound) bound else spread(next, joins)
 
     ///
-    /// 列の参照を表の label に解く。修飾があればその label、無ければ囲む副問い合わせの内側から外へ、その列を持つ表を探す。
+    /// 表 1 つを見分ける名前（label と、置いた副問い合わせ）。
+    ///
+    /// WhyNot: label だけで見分けない。外側と副問い合わせに同じ表を alias 無しで置くと label が同じになり、
+    /// 外側を縛っただけで副問い合わせの表まで縛った事になる。
+    ///
+    def keyOf(touch: Touch): String = "${touch#label}@${touch#scope}"
+
+    ///
+    /// 列の参照を表（`keyOf`）に解く。修飾があればその label を、無ければその列を持つ表を、囲む副問い合わせの内側から外へ探す。
     /// 同じ深さに列を持つ表が 2 つ以上あれば曖昧で None（PG も断る）。INSERT の書き込み先は解き先にしない。
     ///
     def resolveRef(schema: Schema, all: List[Touch], words: Vector[String], position: Int32, label: Option[String], col: String): Option[String] =
+        let scopes = enclosing(position, words) ::: -1 :: Nil;
         match label {
-            case Some(found) => if (List.exists(touch -> touch#label == found, all)) Some(found) else None
+            case Some(found) =>
+                scopes |> List.findMap(scope -> all |> List.find(touch -> touch#scope == scope and touch#label == found)) |> Option.map(keyOf)
             case None =>
-                (enclosing(position, words) ::: -1 :: Nil) |> List.findMap(scope -> {
+                scopes |> List.findMap(scope -> {
                     let owners = all
                         |> List.filter(touch -> not touch#insertTarget and touch#scope == scope and hasColumn(col, schema, touch#table))
-                        |> List.map(touch -> touch#label)
+                        |> List.map(keyOf)
                         |> List.distinct;
                     match owners {
                         case Nil         => None

@@ -10,7 +10,7 @@ effect you catch where you want to. Built with Flix 0.75.3.
 Under `[dependencies]` in your `flix.toml`:
 
 ```toml
-"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }
+"github:ababup1192/sqlfx" = { version = "0.7.0", security = "unrestricted" }
 ```
 
 You write the query in a `.q` file, next to the `migrations/` that define the schema:
@@ -51,12 +51,12 @@ DbTest.runRecording(rows, 0, () -> greet(1i64))      // a unit test: returns (a,
 
 | | |
 |---|---|
-| Install | `"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }` under `[dependencies]` in `flix.toml` |
+| Install | `"github:ababup1192/sqlfx" = { version = "0.7.0", security = "unrestricted" }` under `[dependencies]` in `flix.toml` |
 | Runnable example | [`examples/blog`](examples/blog) — the same blog written twice, once from `.q` and once in raw SQL, with tests against a real PostgreSQL |
 | Design notes | [`docs/design.md`](docs/design.md) (why), [`docs/layer0.md`](docs/layer0.md) (`Sql` / `Decoder` / the effects), [`docs/layer1.md`](docs/layer1.md) (`.q` and the generator) |
 
 `security = "unrestricted"` is required because sqlfx talks to JDBC through Java interop. The short
-form (`= "0.6.0"`) is rejected by Flix for a package that does.
+form (`= "0.7.0"`) is rejected by Flix for a package that does.
 
 The JDBC driver and the pool are not vendored, so name them yourself — the SLF4J binding is there
 because HikariCP logs through SLF4J and will otherwise print a warning to stderr on first use,
@@ -677,8 +677,23 @@ function or a trigger can live in the same migration without the generator havin
 ### Keeping every query inside a tenant
 
 `gen --scope project_id` fails generation for any query that touches a table having a `project_id`
-column without naming that column. This is the multi-tenant write you forgot, caught at build time
-rather than by a customer seeing another customer's rows.
+column without tying that column to a parameter. This is the multi-tenant write you forgot, caught at
+build time rather than by a customer seeing another customer's rows.
+
+Every table the query touches (`FROM`, `JOIN`, `INTO`, `UPDATE`, `USING` and the comma list, at any
+depth, subqueries included) must have its `project_id` compared with a parameter (`= :p`, `= ANY(:p)`,
+`IN (:p)`), or with the `project_id` of a table that is. A join on `id` alone does not count, and
+neither does a mention in the `SELECT` list, in a string or in a comment. An `INSERT` target needs a
+parameter, or a bound source's `project_id`, in the `project_id` position:
+
+```
+-- stops: content_fields is reached by id only
+SELECT f.api_id FROM content_field_definitions d JOIN content_fields f ON f.id = d.field_id
+WHERE d.project_id = :projectId
+-- passes
+SELECT f.api_id FROM content_field_definitions d JOIN content_fields f ON f.id = d.field_id AND f.project_id = d.project_id
+WHERE d.project_id = :projectId
+```
 
 `gen --scope project_id:Tenant` adds an effect name, and then does one more thing: it removes that
 column's value from the generated function's parameters and takes it from the effect instead.
@@ -760,12 +775,9 @@ query upsertContent(entryId: String, stage: String, data: Json, projectId: Int64
 - `RETURNING` of an `INSERT` is resolved against the table it inserts into only, as PostgreSQL does.
 
 **Scope checks per statement.** In a query with `WITH`, `--scope` checks each CTE and the main
-statement on its own, and with stricter rules than a plain query: every table it touches (`FROM`,
-`JOIN`, `INTO`, `UPDATE`, `USING` and the comma list, at any depth) must have its scope column
-compared with a parameter, or with the scope column of a table that is. A mention in the `SELECT`
-list, in a string or in a comment does not count, and an `INSERT` target needs a parameter or a bound
-source's column in the scope column's position. `// unscoped:` in such a query names the statements
-it exempts: `// unscoped: in gone, main <reason>`.
+statement on its own, with the same rules as a plain query
+([Keeping every query inside a tenant](#keeping-every-query-inside-a-tenant)). `// unscoped:` in
+such a query names the statements it exempts: `// unscoped: in gone, main <reason>`.
 
 **The statements, written out.** `gen --statements <path>` writes one JSON line per query listing its
 statements — name (the CTE's, or `main`), kind, target table, the columns an `INSERT` lists or an
@@ -1056,6 +1068,17 @@ Semantic versioning, with the `0.x` rule written out because Flix has no establi
   When the generated output changes shape, that number goes up and `gen --check` fails until you
   regenerate.
 
+### Upgrading from 0.6.0 to 0.7.0
+
+The generated code is the same. What can stop generation: `--scope` now checks a query without `WITH`
+with the same rules as one with it
+([Keeping every query inside a tenant](#keeping-every-query-inside-a-tenant)). A query that named the
+scope column somewhere but did not tie a table's column to a parameter — a join on `id` alone, a
+subquery that only the outer query binds, the column in the `SELECT` list only — now stops at
+`Unscoped`. Tie the table to a parameter or to a bound table's scope column, or mark it
+`// unscoped: <reason>`. The same fix also stops such a subquery inside a `WITH` query: 0.6.0 took the
+outer table and a subquery's table of the same name as one.
+
 ### Upgrading from 0.5.0 to 0.6.0
 
 The generated code has the same shape (header `v10`), so regenerating is only needed for new `WITH`
@@ -1236,7 +1259,7 @@ Apache-2.0
 `flix.toml` の `[dependencies]` に:
 
 ```toml
-"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }
+"github:ababup1192/sqlfx" = { version = "0.7.0", security = "unrestricted" }
 ```
 
 クエリは、スキーマを決める `migrations/` の隣の `.q` ファイルに書く:
@@ -1276,12 +1299,12 @@ DbTest.runRecording(rows, 0, () -> greet(1i64))      // 単体。(a, List[Statem
 
 | | |
 |---|---|
-| 入れる | `flix.toml` の `[dependencies]` に `"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }` |
+| 入れる | `flix.toml` の `[dependencies]` に `"github:ababup1192/sqlfx" = { version = "0.7.0", security = "unrestricted" }` |
 | 動く例 | [`examples/blog`](examples/blog) — 同じブログを `.q` 版と生 SQL 版の 2 通りで書き、実 PostgreSQL のテストを付けてある |
 | 設計の文書 | [`docs/design.md`](docs/design.md)（なぜ）、[`docs/layer0.md`](docs/layer0.md)（`Sql` / `Decoder` / エフェクト）、[`docs/layer1.md`](docs/layer1.md)（`.q` と生成器） |
 
 `security = "unrestricted"` が要るのは、sqlfx が Java interop で JDBC を触るため。
-バージョンだけを書く短い形（`= "0.6.0"`）は、Java interop を使うパッケージには Flix が通さない。
+バージョンだけを書く短い形（`= "0.7.0"`）は、Java interop を使うパッケージには Flix が通さない。
 
 JDBC のドライバとプールは同梱していないので、利用側で名前を書く。SLF4J の束縛が要るのは、
 HikariCP が SLF4J で書くからで、束縛が無いと最初の利用時に標準エラーへ警告が出て、Flix のテストが失敗扱いになる:
@@ -1869,8 +1892,22 @@ RENAME COLUMN、ADD / DROP CONSTRAINT の `ALTER TABLE`。`ALTER COLUMN` を警�
 
 ### 全部の query をテナントの内側に留める
 
-`gen --scope project_id` は、`project_id` 列を持つ表を触るのにその列を書いていない query で生成を止める。
+`gen --scope project_id` は、`project_id` 列を持つ表を触るのにその列を引数に縛っていない query で生成を止める。
 マルチテナントの書き忘れを、顧客が他人の行を見る前にビルドで捕まえる。
+
+触る表（`FROM`・`JOIN`・`INTO`・`UPDATE`・`USING` とカンマの続き。副問い合わせの中も）はどれも、`project_id` が
+引数（`= :p`、`= ANY(:p)`、`IN (:p)`）か、縛られた表の `project_id` と比べられている事。`id` だけの結合、`SELECT`
+リスト・文字列・コメントの中に書いただけでは数えない。`INSERT` の書き込み先は、`project_id` の位置の値が引数か、
+縛られた読み元の `project_id` である事:
+
+```
+-- 止まる: content_fields を id だけで引いている
+SELECT f.api_id FROM content_field_definitions d JOIN content_fields f ON f.id = d.field_id
+WHERE d.project_id = :projectId
+-- 通る
+SELECT f.api_id FROM content_field_definitions d JOIN content_fields f ON f.id = d.field_id AND f.project_id = d.project_id
+WHERE d.project_id = :projectId
+```
 
 `gen --scope project_id:Tenant` はエフェクトの名前を添える形で、検査に加えてもう 1 つやる。
 その列の値を生成関数の引数から外し、エフェクトから取る。
@@ -1946,9 +1983,7 @@ query upsertContent(entryId: String, stage: String, data: Json, projectId: Int64
 - `INSERT` の `RETURNING` は、PG と同じく書き込み先の表だけで解く
 
 **scope は文ごと。** `WITH` を含む query では、`--scope` は CTE の本文 1 つずつと本文を別々に、WITH の無い query
-より厳しい規則で検査する。触る表（`FROM`・`JOIN`・`INTO`・`UPDATE`・`USING` とカンマの続き。深さを問わない）は
-どれも、scope のカラムが引数か、縛られた表の scope のカラムと比べられている事。`SELECT` リスト・文字列・コメントの
-中に書いただけでは数えず、`INSERT` の書き込み先は scope のカラムの位置の値が引数か、縛られた読み元のカラムである事。
+と同じ規則（[全部の query をテナントの内側に留める](#全部の-query-をテナントの内側に留める)）で検査する。
 そういう query の `// unscoped:` は、免除する文を名指しする: `// unscoped: in gone, main 理由`。
 
 **文の一覧を書き出す。** `gen --statements <path>` は query ごとに 1 line の JSON で文を並べる。名前（CTE の名前か
@@ -2213,6 +2248,15 @@ CLI はこのリポジトリの `main` に置き、利用側もここから動�
 - パッチは、API と生成物を変えない修正
 - 生成物のヘッダには生成器のバージョンが入る（`// GENERATED by sqlfx gen v9 …`）。出力の形が変わると
   この番号が上がり、作り直すまで `gen --check` が落ちる
+
+### 0.6.0 から 0.7.0 へ
+
+生成物は変わらない。生成が止まりうる所: `--scope` が、`WITH` の無い query も `WITH` を含む query と同じ規則で検査する
+（[全部の query をテナントの内側に留める](#全部の-query-をテナントの内側に留める)）。scope のカラムの名前はどこかに
+出ているが、表のカラムを引数に縛っていない query（`id` だけの結合、外側だけが縛る副問い合わせ、`SELECT` リストにだけ
+出るカラム）は `Unscoped` で止まる。引数か縛られた表の scope のカラムに結ぶか、`// unscoped: 理由` を付ける。
+同じ直しで、`WITH` を含む query の中のそういう副問い合わせも止まる（0.6.0 は外側の表と副問い合わせの同じ名前の表を
+1 つと見ていた）。
 
 ### 0.5.0 から 0.6.0 へ
 

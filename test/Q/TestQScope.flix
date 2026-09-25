@@ -59,6 +59,40 @@ def testScopeIgnoresCommentAndDollarQuote(): Unit \ Assert =
         (checkSource("query a(id: Int64) -> one { SELECT id FROM entries /* project_id */ WHERE id = :id }"),
          checkSource("query b(id: Int64) -> one { SELECT id, $$project_id$$ AS note FROM entries WHERE id = :id }")))
 
+/// WITH の無い query にも R1〜R4 を当てる。表ごとに scope のカラムが引数か、縛られた表の scope のカラムと比べられている事。
+/// 名前が本文のどこかに出るだけ（SELECT リスト、結合の相手の id だけ、外側だけ縛った副問い合わせ）では通らない。
+@Test
+def testScopeStrictWithoutWith(): Unit \ Assert =
+    let cases = List#{
+        // 結合の相手を id だけで引く（相手の project_id が縛られていない）
+        ("query q(p: Int64) -> many { SELECT e.id FROM teams AS t JOIN entries AS e ON e.id = t.id WHERE t.project_id = :p }",
+            Err("Unscoped(q, entries, project_id)")),
+        // 縛られた表の scope のカラムと結合すれば通る
+        ("query q(p: Int64) -> many { SELECT e.id FROM teams AS t JOIN entries AS e ON e.id = t.id AND e.project_id = t.project_id WHERE t.project_id = :p }",
+            Ok(())),
+        // SELECT リストにだけ出る
+        ("query q(id: Int64) -> many { SELECT project_id FROM entries WHERE id = :id }",
+            Err("Unscoped(q, entries, project_id)")),
+        // 外側は縛り、副問い合わせの entries は縛らない
+        ("query q(p: Int64) -> many { SELECT id FROM entries WHERE project_id = :p AND id IN (SELECT id FROM entries WHERE title = 'x') }",
+            Err("Unscoped(q, entries, project_id)")),
+        // WITH の中でも同じ（外側と副問い合わせの entries が同じ label）
+        ("query q(p: Int64) -> many { WITH w AS (SELECT id FROM entries WHERE project_id = :p AND id IN (SELECT id FROM entries WHERE title = 'x')) SELECT id FROM w }",
+            Err("UnscopedInStatement(q, entries, project_id, w)")),
+        // INSERT ... SELECT の読み元が縛られていない
+        ("query q(id: Int64) -> exec { INSERT INTO entries (project_id, title) SELECT project_id, title FROM entries WHERE id = :id }",
+            Err("Unscoped(q, entries, project_id)")),
+        // 結合の条件だけで、どちらも引数に縛られていない
+        ("query q(id: Int64) -> many { SELECT e.id FROM teams AS t JOIN entries AS e ON e.project_id = t.project_id WHERE t.id = :id }",
+            Err("Unscoped(q, teams, project_id)")),
+        // IN (:p) と ANY(:ids) は縛る
+        ("query q(p: Int64) -> many { SELECT id FROM entries WHERE project_id IN (:p) }", Ok(())),
+        ("query q(ids: List[Int64]) -> many { SELECT id FROM entries WHERE project_id = ANY(:ids) }", Ok(()))
+    };
+    Assert.assertEq(
+        expected = List.map(snd, cases),
+        List.map(match (source, _) -> checkSource(source), cases))
+
 // ---- `// unscoped:` の印 ----
 
 def byHash(): String = "query byHash(h: String) -> one { SELECT id FROM entries WHERE title = :h }\n"
