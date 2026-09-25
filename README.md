@@ -10,7 +10,7 @@ effect you catch where you want to. Built with Flix 0.75.3.
 Under `[dependencies]` in your `flix.toml`:
 
 ```toml
-"github:ababup1192/sqlfx" = { version = "0.5.0", security = "unrestricted" }
+"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }
 ```
 
 You write the query in a `.q` file, next to the `migrations/` that define the schema:
@@ -51,12 +51,12 @@ DbTest.runRecording(rows, 0, () -> greet(1i64))      // a unit test: returns (a,
 
 | | |
 |---|---|
-| Install | `"github:ababup1192/sqlfx" = { version = "0.5.0", security = "unrestricted" }` under `[dependencies]` in `flix.toml` |
+| Install | `"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }` under `[dependencies]` in `flix.toml` |
 | Runnable example | [`examples/blog`](examples/blog) — the same blog written twice, once from `.q` and once in raw SQL, with tests against a real PostgreSQL |
 | Design notes | [`docs/design.md`](docs/design.md) (why), [`docs/layer0.md`](docs/layer0.md) (`Sql` / `Decoder` / the effects), [`docs/layer1.md`](docs/layer1.md) (`.q` and the generator) |
 
 `security = "unrestricted"` is required because sqlfx talks to JDBC through Java interop. The short
-form (`= "0.5.0"`) is rejected by Flix for a package that does.
+form (`= "0.6.0"`) is rejected by Flix for a package that does.
 
 The JDBC driver and the pool are not vendored, so name them yourself — the SLF4J binding is there
 because HikariCP logs through SLF4J and will otherwise print a warning to stderr on first use,
@@ -299,7 +299,7 @@ into "do not change this". Writing a row back is `setOrNull`.
 
 ### Drop to raw SQL, and see it in the type
 
-A CTE, a DDL statement, `SET`, `EXPLAIN`, or a one-off query cannot be written in `.q`. Pass the
+A recursive CTE, a DDL statement, `SET`, `EXPLAIN`, or a one-off query cannot be written in `.q`. Pass the
 string to `Sql.fetch` / `Sql.execute` instead. Those carry the `RawSql` effect, and it propagates to
 every caller, so the places that depend on hand-written SQL can be listed from the signatures, and
 the place where somebody wrote `RawSql.runWithAllow` is the place to audit. Write it inside the
@@ -727,6 +727,52 @@ Between the marker and its `query` you may have `//` comments and blank lines an
 marker with no query after it stops at `DanglingMarker(line)`, so a marker cannot silently lose its
 target when somebody reorders the file.
 
+### CTE (WITH)
+
+A `.q` query may start with `WITH`. Each CTE is typed with the same rules as a plain statement, and
+the ones before it can be read as tables:
+
+```
+query upsertContent(entryId: String, stage: String, data: Json, projectId: Int64) -> exec {
+    WITH written AS (
+        INSERT INTO entry_contents (project_id, entry_id, stage, data) VALUES (:projectId, :entryId, :stage, :data)
+        ON CONFLICT (project_id, entry_id, stage) DO UPDATE SET data = EXCLUDED.data
+        RETURNING entry_id
+    )
+    UPDATE entries SET updated_at = now()
+    WHERE project_id = :projectId AND id = ANY(ARRAY(SELECT entry_id FROM written))
+}
+```
+
+| Form | |
+|---|---|
+| A reading CTE, several CTEs, a later CTE reading an earlier one, `WITH w(a, b) AS`, `[NOT] MATERIALIZED` | Accepted |
+| A writing CTE (`INSERT` / `UPDATE` / `DELETE`) with `RETURNING` | Accepted. Without `RETURNING` it is accepted too, but reading it in `FROM` stops at `CteWithoutReturning` |
+| Two statements of one query writing the same table | Refused (`SameTableWrittenTwice`). PostgreSQL applies only one of two changes to the same row in one statement, so one would be lost without an error |
+| `WITH RECURSIVE`, a `WITH` inside a CTE or a subquery, a CTE named like a table or `main`, a `VALUES` CTE, a `Changes` slot in a query with `WITH` | Refused, each with its own error |
+
+- If any CTE writes, the function is `DbWrite`, even when the main statement is a `SELECT` — it would
+  fail at run time in a `READ ONLY` transaction otherwise.
+- The shape comes from the main statement: `one` / `many` for a `SELECT` or a write with
+  `RETURNING`, `exec` for a write without it.
+- A `SELECT` CTE that nothing reads is a warning: PostgreSQL does not run it.
+- A `Pred` / `Order` slot must name a table in the `FROM` of the statement that holds it.
+- `RETURNING` of an `INSERT` is resolved against the table it inserts into only, as PostgreSQL does.
+
+**Scope checks per statement.** In a query with `WITH`, `--scope` checks each CTE and the main
+statement on its own, and with stricter rules than a plain query: every table it touches (`FROM`,
+`JOIN`, `INTO`, `UPDATE`, `USING` and the comma list, at any depth) must have its scope column
+compared with a parameter, or with the scope column of a table that is. A mention in the `SELECT`
+list, in a string or in a comment does not count, and an `INSERT` target needs a parameter or a bound
+source's column in the scope column's position. `// unscoped:` in such a query names the statements
+it exempts: `// unscoped: in gone, main <reason>`.
+
+**The statements, written out.** `gen --statements <path>` writes one JSON line per query listing its
+statements — name (the CTE's, or `main`), kind, target table, the columns an `INSERT` lists or an
+`UPDATE` sets, and the left-hand side of `ON CONFLICT DO UPDATE SET`. A check of your own ("a query
+that writes `entry_contents.data` also writes `entries.updated_at`") can read it instead of parsing
+SQL; `gen --check` compares it too.
+
 ## Wiring it into a server
 
 Everything sqlfx needs decided lives at the entry point; the functions in between take an effect and
@@ -1010,6 +1056,27 @@ Semantic versioning, with the `0.x` rule written out because Flix has no establi
   When the generated output changes shape, that number goes up and `gen --check` fails until you
   regenerate.
 
+### Upgrading from 0.5.0 to 0.6.0
+
+The generated code has the same shape (header `v10`), so regenerating is only needed for new `WITH`
+queries. What changed:
+
+| 0.5.0 | 0.6.0 |
+|---|---|
+| `Tx.rollback(conn): Unit`, a failed ROLLBACK ignored | `Tx.rollback(conn): Bool`. A connection whose ROLLBACK failed is evicted by the pool entry points |
+| A non-`SQLException` thrown in the thunk of `Pool.withConnection*` / `Jdbc.withConnection` / `Tx.withTx` left as an exception, and the pooled connection leaked | `DbErr`'s `Other`. A fatal throwable is re-thrown after the connection is evicted (closed for `Jdbc.withConnection`; `Tx.withTx` does not own the connection and re-throws without ROLLBACK) |
+| `Db.isFatal` looked at the throwable only | It also follows the cause chain to depth 8 |
+| A fatal throwable could leak the connection of `Pool.withLazyTx*` | Returned, see [Shapes that break, measured](#shapes-that-break-measured). Put `RawSql.runWithAllow` and your own handlers inside the transaction |
+| Your own `SqlRead` / `SqlWrite` handler over a pooled connection | Wrap its JDBC call with `Jdbc.watched` and call `Pool.evict` on a fatal throwable |
+| The scope check counted a column name inside `/* */` or a dollar quote | It does not; such a query now stops at `Unscoped` |
+| The scope check did not count tables after `USING` or in a comma-separated `FROM` | It does |
+| `INSERT … SELECT … FROM t RETURNING id` could stop at `AmbiguousColumn` | `RETURNING` of an `INSERT` resolves against the target table only |
+| `ResolveError.SlotTableNotInFrom` | `SlotTableNotInStatement`. Generation errors are printed as one line with the rule, the value and the fix |
+
+New: `Pool.evict`, `Db.catchAll`, `Db.fromDriver`, `Db.rethrowing`, `Db.describeThrowable`,
+`Db.markCommitOutcomeUnknown` / `Db.isCommitOutcomeUnknown`, `Jdbc.Watch` / `Jdbc.watched` /
+`Jdbc.unwatched` / `Jdbc.runWithConnectionWatched`, `gen --statements`, and `WITH` in `.q`.
+
 ### Upgrading from 0.4.7 to 0.5.0
 
 Every module moved under `Sqlfx`. The functions, their types and the shape of the generated code
@@ -1169,7 +1236,7 @@ Apache-2.0
 `flix.toml` の `[dependencies]` に:
 
 ```toml
-"github:ababup1192/sqlfx" = { version = "0.5.0", security = "unrestricted" }
+"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }
 ```
 
 クエリは、スキーマを決める `migrations/` の隣の `.q` ファイルに書く:
@@ -1209,12 +1276,12 @@ DbTest.runRecording(rows, 0, () -> greet(1i64))      // 単体。(a, List[Statem
 
 | | |
 |---|---|
-| 入れる | `flix.toml` の `[dependencies]` に `"github:ababup1192/sqlfx" = { version = "0.5.0", security = "unrestricted" }` |
+| 入れる | `flix.toml` の `[dependencies]` に `"github:ababup1192/sqlfx" = { version = "0.6.0", security = "unrestricted" }` |
 | 動く例 | [`examples/blog`](examples/blog) — 同じブログを `.q` 版と生 SQL 版の 2 通りで書き、実 PostgreSQL のテストを付けてある |
 | 設計の文書 | [`docs/design.md`](docs/design.md)（なぜ）、[`docs/layer0.md`](docs/layer0.md)（`Sql` / `Decoder` / エフェクト）、[`docs/layer1.md`](docs/layer1.md)（`.q` と生成器） |
 
 `security = "unrestricted"` が要るのは、sqlfx が Java interop で JDBC を触るため。
-バージョンだけを書く短い形（`= "0.5.0"`）は、Java interop を使うパッケージには Flix が通さない。
+バージョンだけを書く短い形（`= "0.6.0"`）は、Java interop を使うパッケージには Flix が通さない。
 
 JDBC のドライバとプールは同梱していないので、利用側で名前を書く。SLF4J の束縛が要るのは、
 HikariCP が SLF4J で書くからで、束縛が無いと最初の利用時に標準エラーへ警告が出て、Flix のテストが失敗扱いになる:
@@ -1447,7 +1514,7 @@ def editPost(id: Int64, edit: PostEdit): Int32 \ DbWrite =
 
 ### 生 SQL に逃げ、それを型に出す
 
-CTE、DDL、`SET`、`EXPLAIN`、その場限りの SQL は `.q` に書けない。文字列を `Sql.fetch` / `Sql.execute`
+再帰の CTE、DDL、`SET`、`EXPLAIN`、その場限りの SQL は `.q` に書けない。文字列を `Sql.fetch` / `Sql.execute`
 に渡す。これらには `RawSql` エフェクトが付き、呼ぶ側へ伝わるので、手書きの SQL に依存する箇所が
 署名から列挙でき、誰かが `RawSql.runWithAllow` を書いた所が監査点になる。サーバの縁でなく Tx の内側に書く
 （[触ってはいけない形（実測）](#触ってはいけない形実測)）:
@@ -1848,6 +1915,47 @@ pub def listEntries(limit: Int64): List[ListEntriesRow] \ DbRead + Tenant   // �
 印と `query` の間に挟んでよいのは `//` コメントと空行だけ。印の後に query が来なければ
 `DanglingMarker(行番号)` で止まるので、誰かがファイルの順を入れ替えても印が黙って対象を失わない。
 
+### CTE（WITH）
+
+`.q` の query は `WITH` で始めてよい。CTE の本文には WITH の無い文と同じ規則で型を付け、それより前の CTE は
+表として読める:
+
+```
+query upsertContent(entryId: String, stage: String, data: Json, projectId: Int64) -> exec {
+    WITH written AS (
+        INSERT INTO entry_contents (project_id, entry_id, stage, data) VALUES (:projectId, :entryId, :stage, :data)
+        ON CONFLICT (project_id, entry_id, stage) DO UPDATE SET data = EXCLUDED.data
+        RETURNING entry_id
+    )
+    UPDATE entries SET updated_at = now()
+    WHERE project_id = :projectId AND id = ANY(ARRAY(SELECT entry_id FROM written))
+}
+```
+
+| 形 | |
+|---|---|
+| 読む CTE、複数の CTE、後ろの CTE が前の CTE を読む、`WITH w(a, b) AS`、`[NOT] MATERIALIZED` | 通す |
+| `RETURNING` 付きの書き込みの CTE（`INSERT` / `UPDATE` / `DELETE`） | 通す。`RETURNING` が無くても通すが、`FROM` で読むと `CteWithoutReturning` |
+| 1 つの query の 2 つの文が同じ表を書く | 断る（`SameTableWrittenTwice`）。PG は同じ row への 2 つの変更の片方しか効かせず、エラー無しで 1 つが消える |
+| `WITH RECURSIVE`、CTE の本文や副問い合わせの中の `WITH`、表と同じ名前か `main` の CTE、`VALUES` の CTE、`WITH` を含む query の `Changes` の slot | 断る（それぞれのエラー） |
+
+- どれかの CTE が書けば、本文が `SELECT` でも関数は `DbWrite`（`READ ONLY` の Tx で実行時に落ちないように）
+- 形は本文で決まる。`SELECT` か `RETURNING` 付きの書き込みなら `one` / `many`、`RETURNING` 無しの書き込みなら `exec`
+- 誰も読まない `SELECT` の CTE は警告（PG はそれを実行しない）
+- `Pred` / `Order` の slot の表は、その slot を含む文の `FROM` に在る事を求める
+- `INSERT` の `RETURNING` は、PG と同じく書き込み先の表だけで解く
+
+**scope は文ごと。** `WITH` を含む query では、`--scope` は CTE の本文 1 つずつと本文を別々に、WITH の無い query
+より厳しい規則で検査する。触る表（`FROM`・`JOIN`・`INTO`・`UPDATE`・`USING` とカンマの続き。深さを問わない）は
+どれも、scope のカラムが引数か、縛られた表の scope のカラムと比べられている事。`SELECT` リスト・文字列・コメントの
+中に書いただけでは数えず、`INSERT` の書き込み先は scope のカラムの位置の値が引数か、縛られた読み元のカラムである事。
+そういう query の `// unscoped:` は、免除する文を名指しする: `// unscoped: in gone, main 理由`。
+
+**文の一覧を書き出す。** `gen --statements <path>` は query ごとに 1 line の JSON で文を並べる。名前（CTE の名前か
+`main`）・種類・書き込み先・`INSERT` のカラムの並びか `UPDATE` の SET の左辺・`ON CONFLICT DO UPDATE SET` の左辺。
+自前の check（「`entry_contents.data` を書く query は `entries.updated_at` も書く」のような物）は SQL を読む代わりに
+これを読める。`gen --check` はこれも突き合わせる。
+
 ## サーバに組み込む
 
 sqlfx に決めてもらう事は全部エントリポイントに置く。間の関数が持つのはエフェクトだけ。
@@ -2105,6 +2213,26 @@ CLI はこのリポジトリの `main` に置き、利用側もここから動�
 - パッチは、API と生成物を変えない修正
 - 生成物のヘッダには生成器のバージョンが入る（`// GENERATED by sqlfx gen v9 …`）。出力の形が変わると
   この番号が上がり、作り直すまで `gen --check` が落ちる
+
+### 0.5.0 から 0.6.0 へ
+
+生成物の形は変わらない（ヘッダは `v10` のまま）ので、生成し直すのは `WITH` の query を足した時だけ。変わった物:
+
+| 0.5.0 | 0.6.0 |
+|---|---|
+| `Tx.rollback(conn): Unit`。ROLLBACK の失敗は捨てていた | `Tx.rollback(conn): Bool`。ROLLBACK に失敗した接続は、プールの入口が evict する |
+| `Pool.withConnection*` / `Jdbc.withConnection` / `Tx.withTx` の thunk の `SQLException` 以外の例外は例外のまま抜け、プールの接続が漏れた | `DbErr` の `Other`。fatal は接続を evict してから投げ直す（`Jdbc.withConnection` は閉じる。`Tx.withTx` は接続を持たないので ROLLBACK を送らずに投げ直す） |
+| `Db.isFatal` は例外そのものだけを見た | cause の連鎖も深さ 8 まで見る |
+| fatal で `Pool.withLazyTx*` の接続が漏れえた | 返る（[触ってはいけない形（実測）](#触ってはいけない形実測)）。`RawSql.runWithAllow` と自前の handler は Tx の内側に張る |
+| プールの接続の上に書いた自前の `SqlRead` / `SqlWrite` の handler | 本体の JDBC を `Jdbc.watched` で包み、fatal なら `Pool.evict` する |
+| scope の検査は `/* */` と dollar quote の中のカラム名も数えた | 数えない。そういう query は `Unscoped` で止まる |
+| scope の検査は `USING` とカンマで並べた `FROM` の表を数えなかった | 数える |
+| `INSERT … SELECT … FROM t RETURNING id` が `AmbiguousColumn` になりえた | `INSERT` の `RETURNING` は書き込み先の表だけで解く |
+| `ResolveError.SlotTableNotInFrom` | `SlotTableNotInStatement`。生成の失敗は規則・受け取った値・直し方の 1 line で出る |
+
+足した物: `Pool.evict`、`Db.catchAll`、`Db.fromDriver`、`Db.rethrowing`、`Db.describeThrowable`、
+`Db.markCommitOutcomeUnknown` / `Db.isCommitOutcomeUnknown`、`Jdbc.Watch` / `Jdbc.watched` / `Jdbc.unwatched` /
+`Jdbc.runWithConnectionWatched`、`gen --statements`、`.q` の `WITH`。
 
 ### 0.4.7 から 0.5.0 へ
 
