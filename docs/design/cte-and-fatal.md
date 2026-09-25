@@ -306,7 +306,7 @@ WITH を含む query の免除は、免除する文の名前を書かせる。�
 
 | case | メッセージ |
 |---|---|
-| `Unscoped`（WITH を含む query では文の名前を足す） | `query X touches T in CTE Y (or: in the main statement) with no condition that ties T.project_id to a parameter. Compare it with a parameter, join it to a table that is, or write // unscoped: in Y <reason>` |
+| `Unscoped`（WITH を含む query では文の名前を足す。C9 で、WITH の無い query の `Unscoped` の形を変えないよう、別の case `UnscopedInStatement(query, table, column, statement)` にした） | `query X touches T in CTE Y (or: in the main statement) with no condition that ties T.project_id to a parameter. Compare it with a parameter, join it to a table that is, or write // unscoped: in Y <reason>` |
 | `UnscopedMarkerNeedsStatement(query)` | `query X has WITH, so // unscoped: must name the statements it exempts: // unscoped: in <CTE name or main> <reason>` |
 | `UnknownMarkedStatement(query, name)` | `// unscoped: of query X names Y, which is neither a CTE of the query nor main` |
 

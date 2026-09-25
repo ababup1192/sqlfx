@@ -8,14 +8,19 @@
 /// 列を書けばその列だけ、省けば `--scope` の全部の列に効く。印と `query` の間には普通の `//` コメントと空行を挟んでよい。
 /// それ以外の行やファイル末尾に当たった印は dangling として生成を止める。
 ///
-/// WhyNot: `列 = :param` の形まで見ないのは、`project_id IN (...)` や JOIN の ON 句など書き方が幅広く、
-/// 「列の名前が本文に 1 度も出ない」事だけを見れば書き忘れは捕まえられるため。
+/// WITH の無い query は「列の名前が本文に 1 度も出ない」事だけを見る（粗い検査）。WITH を含む query は、CTE の本文 1 つずつと
+/// 本文を単位に、表ごとに列が引数（か、引数に縛られた表の列）と比べられているかを見る（R1〜R4。設計 docs/design/cte-and-fatal.md の 1.8）。
+/// WITH を含む query の `// unscoped:` は、免除する文を `// unscoped: [列] in <CTE の名前 | main>[, ...] 理由` で名指しする。
+///
+/// WhyNot: WITH の無い query に R1〜R4 を当てないのは、nextcms の query に当てて 1 つ止まる事を測ったため（設計の 1.8 の計測）。
+/// 止まる query を直した後の minor で当てる。
 /// WhyNot: 注入する引数を「列の camelCase で必須の Int64」に限るのは、値の式が `<effect>.currentId()` に固定で、
 /// 別名の引数まで拾うと `IN (...)` の配列や JOIN の相手の id を取り違えるため。名前だけ合って型が違う物はエラーにして気づかせる。
 ///
 pub mod Sqlfx.Q.QScope {
 
     use Sqlfx.Q.Codegen
+    use Sqlfx.Q.QCte
     use Sqlfx.Q.QRender
     use Sqlfx.Q.QueryDef
     use Sqlfx.Q.Schema
@@ -53,6 +58,12 @@ pub mod Sqlfx.Q.QScope {
         case MarkerColumnNotScoped(String, String)
         /// (クエリ名, 引数名, 列名, 受け取った型) 列の camelCase の引数があるが、必須の Int64 でないので注入できない
         case UninjectableParam(String, String, String, String)
+        /// (クエリ名, テーブル名, 列名, 文の名前) WITH を含む query のその文（CTE の名前か main）で、表の列が引数に縛られていない
+        case UnscopedInStatement(String, String, String, String)
+        /// (クエリ名) WITH を含む query の `// unscoped:` に、免除する文の名前（`in <名前>`）が無い
+        case UnscopedMarkerNeedsStatement(String)
+        /// (クエリ名, 名前) `// unscoped: in` の名前が、その query の CTE でも main でもない
+        case UnknownMarkedStatement(String, String)
     }
 
     ///
@@ -67,6 +78,14 @@ pub mod Sqlfx.Q.QScope {
             "the marker points at query ${name}, which is not in this file. Match the name to the query's"
         case ScopeError.MarkerColumnNotScoped(name, column) =>
             "column ${column} in the marker of query ${name} is not in `--scope`. If you name a column, it must be one of `--scope`; if the reason itself starts with a column name, put the column first"
+        case ScopeError.UnscopedInStatement(name, table, column, statement) => {
+            let place = if (statement == "main") "in the main statement" else "in CTE ${statement}";
+            "query ${name} touches ${table} ${place} with no condition that ties ${table}.${column} to a parameter. Compare it with a parameter, join it to a table that is, or write // unscoped: in ${statement} <reason>"
+        }
+        case ScopeError.UnscopedMarkerNeedsStatement(name) =>
+            "query ${name} has WITH, so // unscoped: must name the statements it exempts: // unscoped: in <CTE name or main> <reason>"
+        case ScopeError.UnknownMarkedStatement(name, statement) =>
+            "// unscoped: of query ${name} names ${statement}, which is neither a CTE of the query nor main"
         case ScopeError.UninjectableParam(name, param, column, received) =>
             "parameter ${param} of query ${name} has the name that is filled from the effect as the value of ${column}, but its type is ${received}. Make it a required Int64, rename it, or, to pass it by hand, write `// scope: explicit ${column} <reason>` on the line before the query"
     }
@@ -97,25 +116,81 @@ pub mod Sqlfx.Q.QScope {
     ///
     /// 1 つの scope について、免除されていない query の違反を探し、通った物の注入を決める。
     ///
-    def planScope(scope: Scope, schema: Schema, unscoped: List[(String, Option[String])], explicit: List[(String, Option[String])], queries: List[Query]): Result[ScopeError, List[(String, Injection)]] =
+    def planScope(scope: Scope, schema: Schema, unscoped: List[Mark], explicit: List[Mark], queries: List[Query]): Result[ScopeError, List[(String, Injection)]] =
         queries
-            |> List.filter(queryDef -> not marked(unscoped, scope#column, queryDef#name))
-            |> List.traverse(queryDef -> match violation(scope#column, schema, queryDef) {
-                case Some(error) => Err(error)
-                case None => injection(scope, schema, explicit, queryDef) |> Result.map(Option.map(found -> (queryDef#name, found)))
+            |> List.traverse(queryDef -> {
+                let marks = marksOf(unscoped, scope#column, queryDef#name);
+                match statementsOf(queryDef) {
+                    case Some(units) =>
+                        forM (
+                            exempt <- exemptStatements(queryDef#name, units, marks);
+                            _ <- units |> List.filter(match (label, _) -> not List.memberOf(label, exempt)) |> List.findMap(match (label, words) ->
+                                    strictViolations(scope#column, schema, words) |> List.head |> Option.map(table -> ScopeError.UnscopedInStatement(queryDef#name, table, scope#column, label))) |> toErr;
+                            found <- injection(scope, schema, explicit, queryDef)
+                        ) yield found |> Option.map(injected -> (queryDef#name, injected))
+                    case None if not List.isEmpty(marks) => Ok(None)
+                    case None => match violation(scope#column, schema, queryDef) {
+                        case Some(error) => Err(error)
+                        case None => injection(scope, schema, explicit, queryDef) |> Result.map(Option.map(found -> (queryDef#name, found)))
+                    }
+                }
             })
             |> Result.map(List.filterMap(identity))
 
     ///
+    /// `// unscoped:` / `// scope: explicit` の印 1 つ: (query 名, 効く列, `in` で名指しした文)。
+    ///
+    type alias Mark = (String, Option[String], Option[List[String]])
+
+    ///
+    /// その query のその列に効く印の、名指しした文の並び（`in` が無ければ None）。
+    ///
+    def marksOf(marks: List[Mark], column: String, name: String): List[Option[List[String]]] =
+        marks |> List.filterMap(match (markedName, markedColumn, statements) ->
+            if (markedName == name and (markedColumn == None or markedColumn == Some(column))) Some(statements) else None)
+
+    ///
+    /// WITH を含む query の免除する文。`in` の無い印は UnscopedMarkerNeedsStatement、無い名前は UnknownMarkedStatement。
+    ///
+    def exemptStatements(name: String, units: List[(String, List[String])], marks: List[Option[List[String]]]): Result[ScopeError, List[String]] =
+        let labels = List.map(fst, units);
+        marks |> List.traverse(statements -> match statements {
+            case None => Err(ScopeError.UnscopedMarkerNeedsStatement(name))
+            case Some(named) => match List.find(one -> not List.memberOf(one, labels), named) {
+                case Some(unknown) => Err(ScopeError.UnknownMarkedStatement(name, unknown))
+                case None => Ok(named)
+            }
+        }) |> Result.map(List.flatten)
+
+    ///
+    /// WITH を含む query なら、検査の単位（CTE の名前と本文の語、最後に ("main", 本文の語)）。WITH が無いか切れなければ None。
+    ///
+    /// WhyNot: 切れない WITH（RECURSIVE・入れ子）を粗い検査に倒すのは、それを断るのは QResolve で、ここで別のエラーにすると
+    /// 同じ query に 2 通りのメッセージが出るため。
+    ///
+    def statementsOf(queryDef: Query): Option[List[(String, List[String])]] =
+        let (sql, _) = QRender.toSql(queryDef);
+        match QCte.split(SqlTokens.tokenize(sql)) {
+            case Ok(statement) if not List.isEmpty(statement#ctes) =>
+                Some(List.map(cte -> (cte#name, cte#body#words), statement#ctes) ::: ("main", statement#main#words) :: Nil)
+            case _ => None
+        }
+
+    def toErr(error: Option[ScopeError]): Result[ScopeError, Unit] = match error {
+        case Some(e) => Err(e)
+        case None => Ok(())
+    }
+
+    ///
     /// (query 名, 列) の印がその query のその列に効くか。列が None の印は全部の列に効く。
     ///
-    def marked(marks: List[(String, Option[String])], column: String, name: String): Bool =
-        List.exists(match (markedName, markedColumn) -> markedName == name and (markedColumn == None or markedColumn == Some(column)), marks)
+    def marked(marks: List[Mark], column: String, name: String): Bool =
+        not List.isEmpty(marksOf(marks, column, name))
 
     ///
     /// 注入する引数。effect の無い scope、explicit の query、列を持つ表を触らない query、列の camelCase の引数が無い query は None。
     ///
-    def injection(scope: Scope, schema: Schema, explicit: List[(String, Option[String])], queryDef: Query): Result[ScopeError, Option[Injection]] =
+    def injection(scope: Scope, schema: Schema, explicit: List[Mark], queryDef: Query): Result[ScopeError, Option[Injection]] =
         match scope#effect {
             case None => Ok(None)
             case Some(effect) =>
@@ -173,16 +248,29 @@ pub mod Sqlfx.Q.QScope {
     ///
     /// 印を (query 名, 効く列) にする。印の最初の語が `--scope` の列ならその列、スキーマにある別の列ならエラー、それ以外は理由の書き出しで全部の列。
     ///
-    def markedColumns(prefix: {prefix = String}, scopes: List[Scope], schema: Schema, source: String, queries: List[Query]): Result[ScopeError, List[(String, Option[String])]] =
+    def markedColumns(prefix: {prefix = String}, scopes: List[Scope], schema: Schema, source: String, queries: List[Query]): Result[ScopeError, List[Mark]] =
         markedEntries(prefix, source)
             |> Result.flatMap(List.traverse(match (name, tail) ->
                 if (not List.exists(queryDef -> queryDef#name == name, queries)) Err(ScopeError.UnknownMarkedQuery(name))
                 else {
-                    let word = String.takeWhile(ch -> not Char.isWhitespace(ch), tail);
-                    if (List.exists(scope -> scope#column == word, scopes)) Ok((name, Some(word)))
+                    let words = String.words(tail);
+                    let word = List.head(words) |> Option.getWithDefault("");
+                    if (List.exists(scope -> scope#column == word, scopes)) Ok((name, Some(word), namedStatements(List.drop(1, words))))
                     else if (isColumnAnywhere(word, schema)) Err(ScopeError.MarkerColumnNotScoped(name, word))
-                    else Ok((name, None))
+                    else Ok((name, None, namedStatements(words)))
                 }))
+
+    ///
+    /// `in a, b 理由` の文の名前。`in` で始まらなければ None。名前はカンマで続け、カンマの付かない名前で終わる。
+    ///
+    def namedStatements(words: List[String]): Option[List[String]] =
+        match words {
+            case "in" :: rest =>
+                let continued = List.takeWhile(String.endsWith(suffix = ","), rest);
+                let last = List.drop(List.length(continued), rest) |> List.head |> Option.toList;
+                Some(List.map(String.dropRight(1), continued) ::: last |> List.map(String.toLowerCase))
+            case _ => None
+        }
 
     def isColumnAnywhere(column: String, schema: Schema): Bool =
         Map.valuesOf(schema) |> List.exists(table -> Option.nonEmpty(Schema.findColumn(column, table)))
@@ -205,14 +293,265 @@ pub mod Sqlfx.Q.QScope {
     def scopedTables(column: String, schema: Schema, queryDef: Query): List[String] =
         let (sql, _) = QRender.toSql(queryDef);
         touchedTables(schema, SqlTokens.tokenize(sql))
-            |> List.filter(table -> Schema.findTable(table, schema) |> Option.exists(found -> Option.nonEmpty(Schema.findColumn(column, found))))
+            |> List.filter(hasColumn(column, schema))
+            |> List.distinct
+
+    def hasColumn(column: String, schema: Schema, table: String): Bool =
+        Schema.findTable(table, schema) |> Option.exists(found -> Option.nonEmpty(Schema.findColumn(column, found)))
+
+    // ---- 触る表（R1）----
 
     ///
-    /// FROM / JOIN / INTO / UPDATE の直後の語のうち、スキーマにある表。
+    /// 触る表の名前（R1）。FROM / JOIN / INTO / UPDATE / USING の後ろと、FROM / USING のカンマの続き。深さを問わない。
+    /// 表の綴りは `ONLY t`、`public.t`、`"t"` を `t` に揃える。スキーマに無い名前（CTE、関数）は数えない。
     ///
     def touchedTables(schema: Schema, words: List[String]): List[String] =
-        List.zip(words, List.drop(1, words))
-            |> List.filterMap(match (keyword, name) ->
-                if (List.memberOf(String.toUpperCase(keyword), List#{"FROM", "JOIN", "INTO", "UPDATE"}) and Map.memberOf(name, schema)) Some(name) else None)
+        touches(schema, List.toVector(words)) |> List.map(touch -> touch#table)
+
+    ///
+    /// 触る表 1 つ。
+    ///
+    /// - `table`: 表の名前
+    /// - `label`: 文の中の名前（alias が無ければ表の名前）
+    /// - `insertTarget`: INSERT の書き込み先か。書き込み先は R3 で見て、修飾の無いカラムの解き先にしない
+    /// - `scope`: 表を置いた副問い合わせ（囲む `(` の位置。一番外は -1）
+    ///
+    type alias Touch = { table = String, label = String, insertTarget = Bool, scope = Int32 }
+
+    def touches(schema: Schema, words: Vector[String]): List[Touch] =
+        List.range(0, Vector.length(words)) |> List.flatMap(i -> {
+            let keyword = upperAt(i, words);
+            if (List.memberOf(keyword, List#{"FROM", "JOIN", "INTO", "UPDATE", "USING"})) {
+                let (next, first) = readTableRef(i + 1, words, schema, keyword == "INTO");
+                let rest = if (keyword == "FROM" or keyword == "USING") commaChain(next, words, schema) else Nil;
+                Option.toList(first) ::: rest
+            } else Nil
+        })
+
+    ///
+    /// i から表を 1 つ読む。戻りは (続きの位置, 表)。スキーマに無ければ表は None。
+    ///
+    def readTableRef(i: Int32, words: Vector[String], schema: Schema, insertTarget: Bool): (Int32, Option[Touch]) =
+        let scope = innermostParen(i, words);
+        let start = if (upperAt(i, words) == "ONLY") i + 1 else i;
+        let (name, afterName) = if (wordAt(start + 1, words) == ".") (wordAt(start + 2, words), start + 3) else (wordAt(start, words), start + 1);
+        if (not Map.memberOf(name, schema)) (afterName, None)
+        else {
+            let next = wordAt(afterName, words);
+            let touch = label -> Some({ table = name, label = label, insertTarget = insertTarget, scope = scope });
+            if (String.toUpperCase(next) == "AS") (afterName + 2, touch(wordAt(afterName + 1, words)))
+            else if (isAlias(next)) (afterName + 1, touch(next))
+            else (afterName, touch(name))
+        }
+
+    def commaChain(i: Int32, words: Vector[String], schema: Schema): List[Touch] =
+        if (wordAt(i, words) != ",") Nil
+        else {
+            let (next, found) = readTableRef(i + 1, words, schema, false);
+            match found {
+                case None => Nil
+                case Some(touch) => touch :: commaChain(next, words, schema)
+            }
+        }
+
+    def isAlias(word: String): Bool =
+        not String.isEmpty(word) and Char.isLetter(String.charAt(0, word)) and not List.memberOf(String.toUpperCase(word), aliasStoppers())
+
+    def aliasStoppers(): List[String] =
+        List#{"WHERE", "JOIN", "ON", "SET", "LEFT", "RIGHT", "INNER", "OUTER", "FULL", "CROSS", "USING", "RETURNING", "GROUP", "ORDER", "LIMIT",
+              "OFFSET", "HAVING", "VALUES", "SELECT", "UNION", "EXCEPT", "INTERSECT", "FOR", "WINDOW", "NATURAL", "LATERAL", "DEFAULT", "DO",
+              "AND", "OR", "NOT", "WITH", "AS", "FROM", "INTO", "UPDATE", "DELETE", "INSERT", "TABLESAMPLE"}
+
+    ///
+    /// i を囲む `(` の位置（内側から）。
+    ///
+    def enclosing(i: Int32, words: Vector[String]): List[Int32] =
+        List.range(0, i) |> List.foldLeft((stack, j) ->
+            if (wordAt(j, words) == "(") j :: stack else if (wordAt(j, words) == ")") List.drop(1, stack) else stack, Nil)
+
+    def innermostParen(i: Int32, words: Vector[String]): Int32 =
+        enclosing(i, words) |> List.head |> Option.getWithDefault(-1)
+
+    // ---- 縛られているか（R2〜R4）----
+
+    ///
+    /// 1 つの単位の中で、scope の列が縛られていない表（書き込み先以外を先に、出た順）。
+    ///
+    /// - R2: 表（か label）の列が引数（`= $n`、`= ANY($n)`、`IN ($n)`）と比べられているか、縛られた別の表の列と `=` で比べられている
+    /// - R3: INSERT の書き込み先は、列の並びのその位置の値が引数か、縛られた読み元の列
+    /// - R4: SELECT リスト・文字列・コメントは「縛る」に数えない（比べる式だけを見るので、どれも数えない）
+    ///
+    /// WhyNot: 修飾の無い列を、囲む副問い合わせの内側から外へ解く（PG と同じ）。全部の表から探すと、
+    /// `DELETE FROM entries WHERE id = ANY(ARRAY(SELECT id FROM entries WHERE project_id = $1)) AND project_id = $1` を曖昧として止める。
+    ///
+    def strictViolations(column: String, schema: Schema, wordList: List[String]): List[String] =
+        let words = List.toVector(wordList);
+        let all = touches(schema, words);
+        let bound = boundLabels(column, schema, all, words);
+        let unbound = all
+            |> List.filter(touch -> hasColumn(column, schema, touch#table))
+            |> List.filter(touch -> if (touch#insertTarget) not insertBound(column, schema, all, bound, words, touch) else not Set.memberOf(touch#label, bound));
+        let (targets, sources) = List.partition(touch -> touch#insertTarget, unbound);
+        (sources ::: targets) |> List.map(touch -> touch#table) |> List.distinct
+
+    ///
+    /// 比べる式の片側。
+    ///
+    enum Side {
+        /// `$n`（`$n::type`、`ANY($n)` も）
+        case Param
+        /// 列の参照（label, 列, 語の位置）
+        case Ref(Option[String], String, Int32)
+        /// それ以外の式
+        case Other
+    }
+
+    ///
+    /// `a = b` と `a IN ($n)` の組。UPDATE の SET 句（`ON CONFLICT DO UPDATE SET` も）の中は代入なので除く。
+    ///
+    def comparisons(words: Vector[String]): List[(Side, Side)] =
+        let excluded = setClauses(words);
+        List.range(0, Vector.length(words)) |> List.filterMap(i ->
+            if (List.exists(match (start, end) -> i > start and i < end, excluded)) None
+            else if (wordAt(i, words) == "=") Some((leftSide(i, words), rightSide(i + 1, words)))
+            else if (upperAt(i, words) == "IN" and wordAt(i + 1, words) == "(" and isParam(wordAt(i + 2, words))) Some((leftSide(i, words), Side.Param))
+            else None)
+
+    ///
+    /// 演算子の位置 i の左の片側。`$n`・`$n::type`・`label.col`・`col`。
+    ///
+    def leftSide(i: Int32, words: Vector[String]): Side =
+        if (isParam(wordAt(i - 1, words))) Side.Param
+        else if (wordAt(i - 2, words) == "::" and isParam(wordAt(i - 3, words))) Side.Param
+        else if (wordAt(i - 2, words) == ".") Side.Ref(Some(wordAt(i - 3, words)), wordAt(i - 1, words), i)
+        else if (isName(wordAt(i - 1, words))) Side.Ref(None, wordAt(i - 1, words), i)
+        else Side.Other
+
+    ///
+    /// 位置 i から始まる右の片側。`$n`・`ANY($n)`・`label.col`・`col`。
+    ///
+    def rightSide(i: Int32, words: Vector[String]): Side =
+        let word = wordAt(i, words);
+        if (isParam(word)) Side.Param
+        else if (String.toUpperCase(word) == "ANY" and wordAt(i + 1, words) == "(" and isParam(wordAt(i + 2, words))) Side.Param
+        else if (isName(word) and wordAt(i + 1, words) == ".") Side.Ref(Some(word), wordAt(i + 2, words), i)
+        else if (isName(word)) Side.Ref(None, word, i)
+        else Side.Other
+
+    ///
+    /// SET 句の範囲（SET の位置, 句の終わり）。終わりは同じ文の WHERE / FROM / RETURNING。
+    ///
+    def setClauses(words: Vector[String]): List[(Int32, Int32)] =
+        let total = Vector.length(words);
+        List.range(0, total) |> List.filterMap(i ->
+            if (upperAt(i, words) != "SET") None
+            else Some((i, List.range(i + 1, total) |> List.find(j -> List.memberOf(upperAt(j, words), List#{"WHERE", "FROM", "RETURNING"})) |> Option.getWithDefault(total))))
+
+    ///
+    /// 縛られた label（R2）。引数と比べた物から始め、縛られた表と列で結んだ表を足していく。
+    ///
+    def boundLabels(column: String, schema: Schema, all: List[Touch], words: Vector[String]): Set[String] =
+        let pairs = comparisons(words);
+        let direct = pairs |> List.filterMap(pair -> match pair {
+            case (Side.Ref(label, col, at), Side.Param) if col == column => resolveRef(schema, all, words, at, label, col)
+            case (Side.Param, Side.Ref(label, col, at)) if col == column => resolveRef(schema, all, words, at, label, col)
+            case _ => None
+        }) |> List.toSet;
+        let joins = pairs |> List.filterMap(pair -> match pair {
+            case (Side.Ref(leftLabel, leftCol, leftAt), Side.Ref(rightLabel, rightCol, rightAt)) if leftCol == column and rightCol == column =>
+                forM (
+                    left <- resolveRef(schema, all, words, leftAt, leftLabel, leftCol);
+                    right <- resolveRef(schema, all, words, rightAt, rightLabel, rightCol)
+                ) yield (left, right)
+            case _ => None
+        });
+        spread(direct, joins)
+
+    def spread(bound: Set[String], joins: List[(String, String)]): Set[String] =
+        let next = joins |> List.foldLeft((acc, pair) -> {
+            let (left, right) = pair;
+            if (Set.memberOf(left, acc)) Set.insert(right, acc) else if (Set.memberOf(right, acc)) Set.insert(left, acc) else acc
+        }, bound);
+        if (next == bound) bound else spread(next, joins)
+
+    ///
+    /// 列の参照を表の label に解く。修飾があればその label、無ければ囲む副問い合わせの内側から外へ、その列を持つ表を探す。
+    /// 同じ深さに列を持つ表が 2 つ以上あれば曖昧で None（PG も断る）。INSERT の書き込み先は解き先にしない。
+    ///
+    def resolveRef(schema: Schema, all: List[Touch], words: Vector[String], position: Int32, label: Option[String], col: String): Option[String] =
+        match label {
+            case Some(found) => if (List.exists(touch -> touch#label == found, all)) Some(found) else None
+            case None =>
+                (enclosing(position, words) ::: -1 :: Nil) |> List.findMap(scope -> {
+                    let owners = all
+                        |> List.filter(touch -> not touch#insertTarget and touch#scope == scope and hasColumn(col, schema, touch#table))
+                        |> List.map(touch -> touch#label)
+                        |> List.distinct;
+                    match owners {
+                        case Nil         => None
+                        case one :: Nil  => Some(Some(one))
+                        case _           => Some(None)
+                    }
+                }) |> Option.flatten
+        }
+
+    ///
+    /// R3: INSERT の書き込み先の scope の列の値が、引数（VALUES）か、引数か縛られた読み元の列（INSERT … SELECT のリストの同じ位置）か。
+    ///
+    def insertBound(column: String, schema: Schema, all: List[Touch], bound: Set[String], words: Vector[String], target: Touch): Bool =
+        let total = Vector.length(words);
+        match List.range(0, total) |> List.find(i -> upperAt(i, words) == "INTO" and wordAt(i + 1, words) == target#table and wordAt(i + 2, words) == "(") {
+            case None => false
+            case Some(intoAt) =>
+                let columnsEnd = List.range(intoAt + 3, total) |> List.find(j -> wordAt(j, words) == ")") |> Option.getWithDefault(total);
+                let columns = List.range(intoAt + 3, columnsEnd) |> List.map(j -> wordAt(j, words)) |> List.filter(word -> word != ",");
+                match List.indexOf(column, columns) {
+                    case None => false
+                    case Some(index) =>
+                        let following = upperAt(columnsEnd + 1, words);
+                        if (following == "VALUES")
+                            itemsAt(columnsEnd + 3, words) |> List.nth(index) |> Option.exists(item -> List.exists(match (word, _) -> isParam(word), item))
+                        else if (following == "SELECT")
+                            itemsAt(columnsEnd + 2, words) |> List.nth(index) |> Option.exists(item ->
+                                List.exists(match (word, _) -> isParam(word), item) or boundColumnItem(column, schema, all, bound, words, item))
+                        else false
+                }
+        }
+
+    ///
+    /// SELECT リストの 1 項目が、縛られた表の scope の列そのもの（`e.project_id` / `project_id`。cast は付いてよい）か。
+    ///
+    def boundColumnItem(column: String, schema: Schema, all: List[Touch], bound: Set[String], words: Vector[String], item: List[(String, Int32)]): Bool =
+        let found = match item {
+            case (label, at) :: (".", _) :: (col, _) :: _ => resolveRef(schema, all, words, at, Some(label), col) |> Option.map(resolved -> (resolved, col))
+            case (col, at) :: _ => resolveRef(schema, all, words, at, None, col) |> Option.map(resolved -> (resolved, col))
+            case Nil => None
+        };
+        found |> Option.exists(match (resolved, col) -> col == column and Set.memberOf(resolved, bound))
+
+    ///
+    /// 位置 i から、深さ 0 のカンマで切った項目（語と位置）。深さ 0 の `)` か FROM で終わる。
+    ///
+    def itemsAt(i: Int32, words: Vector[String]): List[List[(String, Int32)]] =
+        let total = Vector.length(words);
+        def go(j: Int32, depth: Int32, current: List[(String, Int32)], acc: List[List[(String, Int32)]]): List[List[(String, Int32)]] =
+            if (j >= total) List.reverse(List.reverse(current) :: acc)
+            else {
+                let word = wordAt(j, words);
+                if (depth == 0 and (word == ")" or String.toUpperCase(word) == "FROM")) List.reverse(List.reverse(current) :: acc)
+                else if (depth == 0 and word == ",") go(j + 1, depth, Nil, List.reverse(current) :: acc)
+                else if (word == "(") go(j + 1, depth + 1, (word, j) :: current, acc)
+                else if (word == ")") go(j + 1, depth - 1, (word, j) :: current, acc)
+                else go(j + 1, depth, (word, j) :: current, acc)
+            };
+        go(i, 0, Nil, Nil)
+
+    def isParam(word: String): Bool = String.startsWith(prefix = "$", word) and String.length(word) > 1
+
+    def isName(word: String): Bool = not String.isEmpty(word) and (Char.isLetter(String.charAt(0, word)) or String.charAt(0, word) == '_')
+
+    def wordAt(i: Int32, words: Vector[String]): String = Vector.nth(i, words) |> Option.getWithDefault("")
+
+    def upperAt(i: Int32, words: Vector[String]): String = String.toUpperCase(wordAt(i, words))
 
 }
