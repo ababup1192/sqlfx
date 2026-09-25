@@ -98,6 +98,7 @@ mod UsersTable {
     pub def role(): Fragment.Col[UsersTable, String, Fragment.NotNull] = Fragment.Col.Col("role", SqlValue.Str)
     pub def createdAt(): Fragment.Col[UsersTable, Timestamp.Timestamp, Fragment.NotNull] = Fragment.Col.Col("created_at", SqlValue.ofTimestamp)
     pub def deletedAt(): Fragment.Col[UsersTable, Timestamp.Timestamp, Fragment.Nullable] = Fragment.Col.Col("deleted_at", SqlValue.ofTimestamp)
+    pub def updatedAt(): Fragment.Col[UsersTable, Timestamp.Timestamp, Fragment.NotNull] = Fragment.Col.Col("updated_at", SqlValue.ofTimestamp)
 
     ///
     /// Named constraints from the DDL. Translate violations in the function passed to `onConstraint`; a missing case is a compile error.

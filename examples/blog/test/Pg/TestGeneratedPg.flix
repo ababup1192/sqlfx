@@ -75,3 +75,18 @@ def testNotNullIsEnforcedByDb(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
     let kind = BlogTestSupport.withDb(() ->
         DbError.runWithKind(() -> Sql.execute("INSERT INTO users (name, email) VALUES (NULL, 'n@example.com')", Nil)));
     Assert.assertEq(expected = Ok(Err(DbErrorKind.NotNullViolation("name"))), kind)
+
+/// deletePostTouchingAuthor: 書き込みの CTE。記事を消し、書き手の updated_at を同じ 1 文で動かす。
+///
+///   users の updated_at を全部 2000-01-01 にしてから、bob（2）の記事 3 を消す
+///   → 返る id は [2]、記事 3 は消え、updated_at が動いたのは bob だけ
+@Test
+def testPgDeletePostTouchingAuthor(): Unit \ {Assert, IO, Fs.FileRead.FileRead} =
+    let result = BlogTestSupport.withSeed(() -> {
+        discard Sql.execute("UPDATE users SET updated_at = '2000-01-01T00:00:00Z'", Nil);
+        let touched = PostsQueries.deletePostTouchingAuthor(3i64) |> List.map(row -> row#id);
+        let postLeft = Sql.fetch("SELECT id FROM posts WHERE id = 3", Nil) |> List.length;
+        let moved = Sql.fetchAs(Sqlfx.Decoder.int64("id"), "SELECT id FROM users WHERE updated_at > '2000-01-01T00:00:00Z' ORDER BY id", Nil);
+        (touched, postLeft, moved)
+    });
+    Assert.assertEq(expected = Ok((List#{2i64}, 0, List#{2i64})), result)

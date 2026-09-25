@@ -21,7 +21,7 @@ mod PostsQueries {
     ///
     /// Hash of the source posts.q. `gen --check` compares it with the .q on disk.
     ///
-    pub def sourceHash(): Int32 = -2058499632
+    pub def sourceHash(): Int32 = 202507887
 
     ///
     /// One row of postsByUsers.
@@ -162,5 +162,23 @@ mod PostsQueries {
         let sql = "SELECT max(views)::bigint AS top FROM posts WHERE user_id = $1";
         let params = List#{SqlValue.Int64(userId)};
         RawSql.runWithAllow(() -> Sql.fetchOneAs(topViewsOfUserDecoder(), sql, params))
+
+    ///
+    /// One row of deletePostTouchingAuthor.
+    ///
+    pub type alias DeletePostTouchingAuthorRow = { id = Int64 }
+
+    def deletePostTouchingAuthorDecoder(): Decoder[DeletePostTouchingAuthorRow] =
+        forA (
+            id <- Decoder.int64("id")
+        ) yield { id = id }
+
+    ///
+    /// deletePostTouchingAuthor: WITH gone AS (DELETE FROM posts WHERE id = $1 RETURNING user_id) UPDATE users SET updated_at = now() WHERE id = ANY(ARRAY(SELECT user_id FROM gone)) RETURNING id
+    ///
+    pub def deletePostTouchingAuthor(id: Int64): List[DeletePostTouchingAuthorRow] \ DbWrite =
+        let sql = "WITH gone AS (DELETE FROM posts WHERE id = $1 RETURNING user_id)\n    UPDATE users SET updated_at = now() WHERE id = ANY(ARRAY(SELECT user_id FROM gone)) RETURNING id";
+        let params = List#{SqlValue.Int64(id)};
+        RawSql.runWithAllow(() -> Sql.executeReturningAs(deletePostTouchingAuthorDecoder(), sql, params))
 
 }

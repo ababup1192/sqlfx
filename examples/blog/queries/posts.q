@@ -40,3 +40,10 @@ query deletePostsOfUser(userId: Int64) -> exec {
 query topViewsOfUser(userId: Int64) -> one {
     SELECT max(views)::bigint! AS top FROM posts WHERE user_id = :userId
 }
+
+// 記事を消し、書き手の updated_at を同じ 1 文で動かす（書き込みの CTE）。返すのは updated_at を動かした書き手の id。
+// 2 つの文は別の表を書く（同じ表を 2 つの文で書くと、PG は片方しか効かせないので生成器が断る）
+query deletePostTouchingAuthor(id: Int64) -> many {
+    WITH gone AS (DELETE FROM posts WHERE id = :id RETURNING user_id)
+    UPDATE users SET updated_at = now() WHERE id = ANY(ARRAY(SELECT user_id FROM gone)) RETURNING id
+}

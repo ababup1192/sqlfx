@@ -321,3 +321,41 @@ def testRenderTwoInjections(): Unit \ Assert =
         "        let sql = \"SELECT id FROM teams WHERE project_id = $1 AND org_id = $2\";",
         "        let params = List#{SqlValue.Int64(projectId), SqlValue.Int64(orgId)};"
     }), body)
+
+/// CTE を含む query の生成物: 書き込みの CTE を読む SELECT は DbWrite + executeReturningAs、読むだけの CTE は DbRead + fetchAs。
+@Test
+def testRenderCteEffects(): Unit \ Assert =
+    let source = "query dropPost(id: Int64) -> many { WITH w AS (DELETE FROM posts WHERE id = :id RETURNING id) SELECT id FROM w }\n"
+        + "query readPosts() -> many { WITH a AS (SELECT id FROM posts) SELECT id FROM a }";
+    let schema = DdlParser.apply("CREATE TABLE posts (id BIGINT PRIMARY KEY)", Schema.empty()) |> Result.map(fst) |> Result.getWithDefault(Schema.empty());
+    let lines = QParser.parseFile(source)
+        |> Result.mapErr(ToString.toString)
+        |> Result.flatMap(queries -> Result.traverse(QResolve.resolve(schema), queries) |> Result.mapErr(ToString.toString))
+        |> Result.flatMap(resolved -> Codegen.renderQueries({ fileName = "posts.q", source = source }, resolved) |> Result.mapErr(ToString.toString))
+        |> Result.map(code -> String.splitOn(substr = "\n", code) |> List.filter(line -> (String.startsWith(prefix = "    pub def ", line) and not String.contains(substr = "sourceHash", line)) or String.contains(substr = "RawSql.runWithAllow", line)));
+    Assert.assertEq(expected = Ok(List#{
+        "    pub def dropPost(id: Int64): List[DropPostRow] \\ DbWrite =",
+        "        RawSql.runWithAllow(() -> Sql.executeReturningAs(dropPostDecoder(), sql, params))",
+        "    pub def readPosts(): List[ReadPostsRow] \\ DbRead =",
+        "        RawSql.runWithAllow(() -> Sql.fetchAs(readPostsDecoder(), sql, params))"
+    }), lines)
+
+/// 設計の 1.3 の 3 つを --scope project_id:Tenant で生成した署名と、呼ぶ Sql の関数。
+@Test
+def testRenderEntriesCteQueries(): Unit \ Assert =
+    let source = entriesCteQueries();
+    let injection = { param = "projectId", effect = "Tenant" };
+    let injections = Map#{"upsertContent" => List#{injection}, "fillMissingField" => List#{injection}, "upsertContents" => List#{injection}};
+    let lines = QParser.parseFile(source)
+        |> Result.mapErr(ToString.toString)
+        |> Result.flatMap(queries -> Result.traverse(QResolve.resolve(cteSchema()), queries) |> Result.mapErr(ToString.toString))
+        |> Result.flatMap(resolved -> Codegen.renderQueriesWith({ fileName = "entries.q", source = source }, injections, resolved) |> Result.mapErr(ToString.toString))
+        |> Result.map(code -> String.splitOn(substr = "\n", code) |> List.filter(line -> (String.startsWith(prefix = "    pub def ", line) and not String.contains(substr = "sourceHash", line)) or String.contains(substr = "RawSql.runWithAllow", line)));
+    Assert.assertEq(expected = Ok(List#{
+        "    pub def upsertContent(args: { entryId = String, stage = String, typeId = Int64, data = Util.Json.Json, dataFold = Util.Json.Json }): Int32 \\ DbWrite + Tenant =",
+        "        RawSql.runWithAllow(() -> Sql.execute(sql, params))",
+        "    pub def fillMissingField(args: { typeId = Int64, path = String, patch = Util.Json.Json, foldKey = String, foldText = String }): List[FillMissingFieldRow] \\ DbWrite + Tenant =",
+        "        RawSql.runWithAllow(() -> Sql.executeReturningAs(fillMissingFieldDecoder(), sql, params))",
+        "    pub def upsertContents(args: { entryIds = List[String], stages = List[String], datas = List[String], dataFolds = List[String], typeId = Int64 }): List[UpsertContentsRow] \\ DbWrite + Tenant =",
+        "        RawSql.runWithAllow(() -> Sql.executeReturningAs(upsertContentsDecoder(), sql, params))"
+    }), lines)
