@@ -302,7 +302,8 @@ into "do not change this". Writing a row back is `setOrNull`.
 A CTE, a DDL statement, `SET`, `EXPLAIN`, or a one-off query cannot be written in `.q`. Pass the
 string to `Sql.fetch` / `Sql.execute` instead. Those carry the `RawSql` effect, and it propagates to
 every caller, so the places that depend on hand-written SQL can be listed from the signatures, and
-the boundary where somebody wrote `RawSql.runWithAllow` is the place to audit:
+the place where somebody wrote `RawSql.runWithAllow` is the place to audit. Write it inside the
+transaction, not at the edge of the server (see [Shapes that break, measured](#shapes-that-break-measured)):
 
 ```flix
 use Sqlfx.SqlValue.SqlValue
@@ -734,11 +735,10 @@ nothing more.
 ```mermaid
 flowchart TD
   f["DbError.runWithFailure"] -->|"takes DbErr and TransientDbErr out of the type;<br/>one Result comes back"| r["Retry.withRetryWith"]
-  r -->|"takes TransientDbErr out: calls the thunk again from the top"| c["Pool.withConnection"]
-  c -->|"borrows one connection, and answers SqlRead, SqlWrite, SqlSavepoint with JDBC"| raw["RawSql.runWithAllow"]
-  raw -->|"takes RawSql out: the one place hand-written SQL is allowed"| oc["UsersTable.onConstraint"]
-  oc -->|"turns a violation of that table into your domain effect"| tx["Tx.withTx"]
-  tx -->|"BEGIN, then COMMIT, or ROLLBACK and raise again"| uc["your use case:<br/>effect DbWrite, nothing else"]
+  r -->|"takes TransientDbErr out: calls the thunk again from the top"| tx["Pool.withLazyTx"]
+  tx -->|"borrows at the first statement, BEGIN, answers SqlRead, SqlWrite, SqlSavepoint;<br/>COMMIT, or ROLLBACK and raise again"| raw["RawSql.runWithAllow"]
+  raw -->|"takes RawSql out: the one place hand-written SQL is allowed,<br/>inside the transaction"| oc["UsersTable.onConstraint"]
+  oc -->|"turns a violation of that table into your domain effect"| uc["your use case:<br/>effect DbWrite, nothing else"]
   test["DbTest.runWithRows, DbTest.runRecording"] -.->|"a unit test answers the same three ops in memory,<br/>and every other layer stays as it is"| uc
 ```
 
@@ -754,8 +754,11 @@ leakDetectionThresholdMs = 0 }`, over a `{ url, user, password }`. `Pool.open` d
 first borrow does. For a CLI or a test that connects once, `Jdbc.withConnection(config, conn -> …)`
 skips the pool entirely.
 
-Stack the four outer ones at the edge shared by every HTTP handler. What each handler writes for
-itself is the validation, the transaction boundary, and the constraint translation. Domain errors
+Stack the two outer ones at the edge shared by every HTTP handler, and everything from
+`Pool.withLazyTx` inward per unit of work: a handler that the thunk uses must be installed inside the
+transaction, or an exception can leak the connection
+([Shapes that break, measured](#shapes-that-break-measured)). What each handler writes for itself
+is the validation, the transaction boundary, and the constraint translation. Domain errors
 (`RegisterErr` and the like) are translated in the service layer and mapped to a status in the
 controller; [`examples/blog/src/BlogForm.flix`](examples/blog/src/BlogForm.flix) shows them joined
 with validation errors under one type. `DbTest.runLogging` at the same edge records the statements
@@ -819,40 +822,62 @@ a `DbErr` or into the return value, for example
 
 | Shape | What happens |
 |---|---|
-| `try { run … with handler X { … } } catch { … }` | An exception thrown inside the handler, or after resuming from an op, sails past the `catch`. Put the `catch` **inside** the handler, innermost |
 | `catch { case e: Throwable => SomeEff.op(...) }` | A JVM `VerifyError`. Return a value from the catch arm and call the op after leaving it |
 | `def f(thunk: Unit -> a \ ef): a \ ef + DbErr` where `ef` is `DbErr` | E6217. A function with an effect variable cannot also declare that effect |
 | A handler that never resumes | Legal, but a `Void` op cannot be resumed, so nothing after that op runs |
+| A `try` around code that performs an op and then throws | See below: whether the `catch` sees the exception depends on how the code is written |
 
-JVM exceptions do not appear in a type. `Pool.withLazyTx` catches them innermost inside its own
-handler and turns them into `DbErr`'s `Other` (a `VirtualMachineError` such as `OutOfMemoryError` is
-re-thrown). **That catch does not reach inside a handler you installed in the thunk** — the first row
-of the table above, happening at the boundary between the library and you:
+JVM exceptions do not appear in a type, and a Flix `try` does not always see an exception thrown
+after an effect op has been resumed. Measured on Flix 0.75.3 and 0.76.0
+([`test/Db/TestCatchNesting.flix`](test/Db/TestCatchNesting.flix)):
 
-```
-   Pool.withLazyTx(pool, thunk)
-     └─ run … with handler SqlRead / SqlWrite      ← the library's handler
-          └─ catch (Db.guard)                      ← catches down to here
-               └─ BizErr.runWithResult(…)          ← your handler
-                    └─ Session.runWith(…)
-                         └─ throw RuntimeException  ← past the library's catch: no COMMIT, no ROLLBACK, no return to the pool
-```
+| Between the handler that answered the op and the `throw` | A `try` in between | A `try` around that handler's `run` |
+|---|---|---|
+| Nothing: the op and the `throw` are written directly in one lambda | catches | catches |
+| The op and the `throw` sit in a separate function (a `def`) | **misses** | catches |
+| A `run` with no `catch` directly under it, a self-recursive function, or a closure taken out of a record, a `Ref` or a `List` | **misses** | catches |
 
-So if the thunk installs handlers of your own, put `Db.guard` directly inside the innermost one. It
-makes the same judgement the library does — fatal is re-thrown, everything else becomes
-`DbErr.other`, falling back to the class name when there is no message — and the resulting `DbErr`
-rides the normal ROLLBACK path:
+When it misses, the exception comes out where the handler that answered the op called `resume`,
+and it propagates normally from there. Values still come back correctly; only exceptions skip. The
+ordinary ways of writing code — a query function that throws, a resolver stored in a record — are in
+the "misses" rows.
+
+So `Pool.withLazyTx*`, `Pool.withConnection*`, `Jdbc.withConnection` and `Tx.withTx` catch in three
+places: in the body of their `SqlRead` / `SqlWrite` / `SqlSavepoint` handlers, directly under those
+handlers (`Db.guard`), and around the whole `run` of those handlers. A fatal throwable
+(`VirtualMachineError` such as `OutOfMemoryError`, found anywhere in the cause chain up to depth 8;
+`StackOverflowError` is not fatal) is never turned into a value: the connection is evicted from the
+pool and the same throwable is thrown again. Anything else becomes `DbErr`'s `Other` and the
+transaction rolls back. An exception raised from inside pgjdbc (its class or its top stack frame is
+`org.postgresql.…`) leaves the connection in an unknown state, so that connection is evicted instead
+of being rolled back and returned. A fatal throwable in the middle of COMMIT carries a marker, since
+whether COMMIT reached the server is unknown; check it with `Db.isCommitOutcomeUnknown(error)`.
+
+**What still leaks: an op to a handler installed outside the transaction.** Once the thunk performs
+an op that a handler outside `withLazyTx` answers, every frame in between — including the library's
+catches — has been resumed from outside, and an exception thrown later in one of the "misses" shapes
+comes out at that outer handler. None of the library's catches sees it, and the connection stays
+borrowed ([`test/Pg/TestPoolFatal.flix`](test/Pg/TestPoolFatal.flix), `testRawSqlOutsideTxLeaks`).
+**Install every handler the thunk uses inside the transaction**, `RawSql.runWithAllow` included:
 
 ```flix
 Pool.withLazyTxResult(pool, () ->
-    BizErr.runWithResult(() ->
-        Session.runWith(actor, () ->
-            Db.guard(() -> work()))))        // inside the handler nearest the thing that can throw
+    RawSql.runWithAllow(() ->                  // inside the transaction, not at the edge
+        BizErr.runWithResult(() ->
+            Session.runWith(actor, () ->
+                work()))))
 ```
 
-One place is enough — the innermost. Anything thrown under an outer handler happened inside that
-handler, where the library's own catch reaches it. The test is
-`testPoolLazyTxGuardInsideUserHandler` in [`test/Pg/TestPool.flix`](test/Pg/TestPool.flix).
+`Db.guard` directly inside your innermost handler is still worth keeping: in the shapes where it is
+reached it turns a JVM exception into `DbErr.other` right where it happened.
+
+Two more rules. Use `Pool.withLazyTx*` rather than `Pool.withConnection(pool, conn -> Tx.withTx(conn, …))`
+for a transaction on a pooled connection: `Tx.withTx` does not own the connection, so on a fatal
+throwable it throws without sending ROLLBACK and cannot evict. And if you write your own `SqlRead` /
+`SqlWrite` handler over a pooled connection, wrap the JDBC call in its body with
+`Jdbc.watched({ onFatal = () -> Pool.evict(pool, conn), driverFailed = … }, …)` and call `resume`
+after that, not inside a `try` — a `resume` inside a `try` lets the handler catch the caller's
+exceptions in some shapes and miss them in others.
 
 ### What must not go inside a retried thunk
 
@@ -1424,7 +1449,8 @@ def editPost(id: Int64, edit: PostEdit): Int32 \ DbWrite =
 
 CTE、DDL、`SET`、`EXPLAIN`、その場限りの SQL は `.q` に書けない。文字列を `Sql.fetch` / `Sql.execute`
 に渡す。これらには `RawSql` エフェクトが付き、呼ぶ側へ伝わるので、手書きの SQL に依存する箇所が
-署名から列挙でき、誰かが `RawSql.runWithAllow` を書いた境界が監査点になる:
+署名から列挙でき、誰かが `RawSql.runWithAllow` を書いた所が監査点になる。サーバの縁でなく Tx の内側に書く
+（[触ってはいけない形（実測）](#触ってはいけない形実測)）:
 
 ```flix
 use Sqlfx.SqlValue.SqlValue
@@ -1829,11 +1855,10 @@ sqlfx に決めてもらう事は全部エントリポイントに置く。間�
 ```mermaid
 flowchart TD
   f["DbError.runWithFailure"] -->|"takes DbErr and TransientDbErr out of the type;<br/>one Result comes back"| r["Retry.withRetryWith"]
-  r -->|"takes TransientDbErr out: calls the thunk again from the top"| c["Pool.withConnection"]
-  c -->|"borrows one connection, and answers SqlRead, SqlWrite, SqlSavepoint with JDBC"| raw["RawSql.runWithAllow"]
-  raw -->|"takes RawSql out: the one place hand-written SQL is allowed"| oc["UsersTable.onConstraint"]
-  oc -->|"turns a violation of that table into your domain effect"| tx["Tx.withTx"]
-  tx -->|"BEGIN, then COMMIT, or ROLLBACK and raise again"| uc["your use case:<br/>effect DbWrite, nothing else"]
+  r -->|"takes TransientDbErr out: calls the thunk again from the top"| tx["Pool.withLazyTx"]
+  tx -->|"borrows at the first statement, BEGIN, answers SqlRead, SqlWrite, SqlSavepoint;<br/>COMMIT, or ROLLBACK and raise again"| raw["RawSql.runWithAllow"]
+  raw -->|"takes RawSql out: the one place hand-written SQL is allowed,<br/>inside the transaction"| oc["UsersTable.onConstraint"]
+  oc -->|"turns a violation of that table into your domain effect"| uc["your use case:<br/>effect DbWrite, nothing else"]
   test["DbTest.runWithRows, DbTest.runRecording"] -.->|"a unit test answers the same three ops in memory,<br/>and every other layer stays as it is"| uc
 ```
 
@@ -1849,8 +1874,9 @@ leakDetectionThresholdMs = 0 }` で、`connection` は `{ url, user, password }`
 接続せず、最初の borrow で開く。CLI やテストのように 1 回だけ繋ぐなら
 `Jdbc.withConnection(config, conn -> …)` でプールを使わない。
 
-外側の 4 つは全 HTTP ハンドラ共通の縁に重ねる。ハンドラごとに書くのは検証・Tx の範囲・
-制約違反の翻訳。業務エラー（`RegisterErr` のような物）は service 層で翻訳し、controller で HTTP の
+外側の 2 つは全 HTTP ハンドラ共通の縁に重ね、`Pool.withLazyTx` から内側は仕事の単位ごとに重ねる。thunk が使う
+handler は Tx の内側に張らないと、例外で接続が漏れうる（[触ってはいけない形（実測）](#触ってはいけない形実測)）。
+ハンドラごとに書くのは検証・Tx の範囲・制約違反の翻訳。業務エラー（`RegisterErr` のような物）は service 層で翻訳し、controller で HTTP の
 ステータスに写す。検証のエラーと 1 つの型にまとめる例が
 [`examples/blog/src/BlogForm.flix`](examples/blog/src/BlogForm.flix)。同じ縁に `DbTest.runLogging` を
 被せると、発行した文と件数が記録できる。
@@ -1910,39 +1936,53 @@ DbError.runWithFailure(() ->
 
 | 形 | 何が起きるか |
 |---|---|
-| `try { run … with handler X { … } } catch { … }` | handler の中や、op から再開した後に飛んだ例外が catch を素通りする。catch は handler の**内側**（最内側）に置く |
 | `catch { case e: Throwable => SomeEff.op(...) }` | JVM の VerifyError。catch の腕では値だけ返し、op は catch を抜けてから呼ぶ |
 | `def f(thunk: Unit -> a \ ef): a \ ef + DbErr` の `ef` に `DbErr` が来る | E6217。エフェクトが型変数の関数で、同じエフェクトを declared にはできない |
 | resume しない handler で握り潰す | できるが、`Void` の op は resume できないので、その op の後ろは走らない |
+| op を投げた後で例外を投げるコードを `try` で包む | 下のとおり、catch が例外を見るかは書き方で変わる |
 
-JVM の例外は型に出ない。`Pool.withLazyTx` は自分の handler の最内側で catch して `DbErr` の `Other` に
-変える（`OutOfMemoryError` のような `VirtualMachineError` はそのまま再送出）。**ただし、その catch は
-利用側が thunk の中で張った handler の内側には届かない。** 上の表の 1 行目と同じ事が、ライブラリと
-利用側の境で起きる:
+JVM の例外は型に出ず、Flix の `try` は、エフェクトの op から再開した後に投げた例外をいつも見るとは限らない。
+Flix 0.75.3 と 0.76.0 で測った（[`test/Db/TestCatchNesting.flix`](test/Db/TestCatchNesting.flix)）:
 
-```
-   Pool.withLazyTx(pool, thunk)
-     └─ run … with handler SqlRead / SqlWrite      ← ライブラリの handler
-          └─ catch（Db.guard）                     ← ここまでは拾える
-               └─ BizErr.runWithResult(…)          ← 利用側の handler
-                    └─ Session.runWith(…)
-                         └─ throw RuntimeException  ← ライブラリの catch を素通り。COMMIT / ROLLBACK と接続の返却が飛ぶ
-```
+| op に答えた handler と `throw` の間にある物 | 間の `try` | その handler の `run` を外から包む `try` |
+|---|---|---|
+| 無し（op と `throw` を 1 つの lambda に直に書く） | 拾う | 拾う |
+| op と `throw` が別の関数（`def`）の中 | **飛ばす** | 拾う |
+| catch を直下に持たない `run`、自己再帰の関数、record / `Ref` / `List` から取り出した closure | **飛ばす** | 拾う |
 
-thunk の中で自分の handler を張るなら、一番内側の handler の直下に `Db.guard` を置く。中身は
-ライブラリの catch と同じ判断で（fatal は再送出、それ以外は `DbErr.other`。message が無ければ class 名）、
-`DbErr` になった例外は普通の失敗として ROLLBACK に乗る:
+飛ばした例外は、op に答えた handler が `resume` を呼んだ所から出てきて、そこから普通に伝わる。値は正しく
+戻り、飛ばすのは例外だけ。例外を投げる query の関数、record に入れたリゾルバ、のような普通の書き方が
+「飛ばす」の側に入る。
+
+そこで `Pool.withLazyTx*`・`Pool.withConnection*`・`Jdbc.withConnection`・`Tx.withTx` は 3 か所で拾う:
+`SqlRead` / `SqlWrite` / `SqlSavepoint` の handler の本体、その handler の直下（`Db.guard`）、handler の
+`run` 全体の外側。fatal（`OutOfMemoryError` のような `VirtualMachineError`。cause の連鎖も深さ 8 まで見る。
+`StackOverflowError` は fatal でない）は値にしない。接続をプールから evict して、同じ物を投げ直す。それ以外は
+`DbErr` の `Other` にして ROLLBACK する。pgjdbc の中から出た例外（class か stack trace の先頭の frame が
+`org.postgresql.…`）の後は接続の状態が分からないので、ROLLBACK して返さずに evict する。COMMIT の最中の
+fatal には、COMMIT が届いたか分からない印が付く。`Db.isCommitOutcomeUnknown(error)` で見る。
+
+**まだ漏れる物: Tx の外に張った handler への op。** thunk が `withLazyTx` の外の handler に答えてもらう op を
+一度でも投げると、間の frame（ライブラリの catch を含む）は全部外から再開された物になり、その後で「飛ばす」の
+形で投げた例外は外の handler の所から出てくる。ライブラリの catch のどれにも届かず、接続は借りたままになる
+（[`test/Pg/TestPoolFatal.flix`](test/Pg/TestPoolFatal.flix) の `testRawSqlOutsideTxLeaks`）。
+**thunk が使う handler は、`RawSql.runWithAllow` も含めて全部 Tx の内側に張る:**
 
 ```flix
 Pool.withLazyTxResult(pool, () ->
-    BizErr.runWithResult(() ->
-        Session.runWith(actor, () ->
-            Db.guard(() -> work()))))        // 例外を投げうる物の直近の handler の内側
+    RawSql.runWithAllow(() ->                  // サーバの縁でなく、Tx の内側
+        BizErr.runWithResult(() ->
+            Session.runWith(actor, () ->
+                work()))))
 ```
 
-置くのは一番内側の 1 か所で良い。外側の handler で飛ぶ物はその handler の中で起きた事なので、
-ライブラリの catch が拾う。テストは [`test/Pg/TestPool.flix`](test/Pg/TestPool.flix) の
-`testPoolLazyTxGuardInsideUserHandler`。
+一番内側の handler の直下の `Db.guard` は残す価値がある。届く形では、JVM の例外をその場で `DbErr.other` にする。
+
+決まりをもう 2 つ。プールの接続で Tx を張るなら `Pool.withConnection(pool, conn -> Tx.withTx(conn, …))` でなく
+`Pool.withLazyTx*` を使う。`Tx.withTx` は接続を持っていないので、fatal では ROLLBACK を送らずに投げ直すだけで
+evict できない。自前の `SqlRead` / `SqlWrite` の handler をプールの接続の上に書くなら、本体の JDBC を
+`Jdbc.watched({ onFatal = () -> Pool.evict(pool, conn), driverFailed = … }, …)` で包み、`resume` はその後で呼ぶ
+（`try` の中で `resume` すると、形によって呼び手の例外を handler が拾ったり、拾わなかったりする）。
 
 ### 再実行される thunk に入れてはいけない物
 
