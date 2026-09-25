@@ -1,5 +1,6 @@
 pub mod Sqlfx.Tx {
 
+    use Sqlfx.Db
     use Sqlfx.DbErr
     use Sqlfx.DbError
     use Sqlfx.Jdbc
@@ -23,12 +24,15 @@ pub mod Sqlfx.Tx {
     ///
     /// ネストは扱わない。thunk の中でまた `withTx` を同じ接続で呼ぶと内側の COMMIT で外側も確定する。
     /// Tx の一部分だけを巻き戻したいなら `withSavepoint`。
+    /// thunk の JVM の例外は `DbErr` の `Other` にして ROLLBACK する。fatal は ROLLBACK を送らずに投げ直す
+    /// （接続は呼び手の物で捨てられないので、捨てるのは呼び手。プールの接続なら `Pool.withLazyTx*` を使う）。
     ///
     pub def withTx(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         begin(conn);
-        match DbError.runWithKind(() -> Jdbc.runWithConnection(conn, thunk)) {
+        let watch = Jdbc.unwatched();
+        match Jdbc.watched(watch, () -> DbError.runWithKind(() -> Jdbc.runWithConnectionWatched(() -> conn, watch, () -> Db.guard(thunk)))) {
             case Ok(value) => { commit(conn); value }
-            case Err(kind) => { rollback(conn); DbError.raise(kind) }
+            case Err(kind) => { discard rollback(conn); DbError.raise(kind) }
         }
 
     ///
@@ -89,14 +93,14 @@ pub mod Sqlfx.Tx {
     ///
     pub def commit(conn: Connection): Unit \ {IO, TransientDbErr, DbErr} =
         if (isAborted(conn)) {
-            rollback(conn);
+            discard rollback(conn);
             DbErr.rollback()
         } else
             try {
                 conn.commit();
                 conn.setAutoCommit(true)
             } catch {
-                case e: SQLException => { rollback(conn); Jdbc.raiseSqlException(e) }
+                case e: SQLException => { discard rollback(conn); Jdbc.raiseSqlException(e) }
             }
 
     ///
@@ -117,14 +121,18 @@ pub mod Sqlfx.Tx {
         }
 
     ///
-    /// ROLLBACK して autocommit に戻す。ROLLBACK の失敗は握りつぶす（元のエラーをそのまま再送出したいので）。
+    /// ROLLBACK して autocommit に戻す。成功したか（ROLLBACK と autocommit の戻しの両方が通ったか）を返す。
+    /// 失敗した接続は Tx の途中のままなので、プールの接続なら返さずに捨てる（`Pool.evict`）。
     ///
-    pub def rollback(conn: Connection): Unit \ IO =
+    /// WhyNot: 失敗を例外にしないのは、呼ぶ所は元のエラーを再送出する途中で、ROLLBACK の失敗でそれを上書きしたくないため。
+    ///
+    pub def rollback(conn: Connection): Bool \ IO =
         try {
             conn.rollback();
-            conn.setAutoCommit(true)
+            conn.setAutoCommit(true);
+            true
         } catch {
-            case _: SQLException => ()
+            case _: SQLException => false
         }
 
 }

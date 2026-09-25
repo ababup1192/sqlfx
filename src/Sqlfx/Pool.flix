@@ -121,6 +121,21 @@ pub mod Sqlfx.Pool {
         source.close()
 
     ///
+    /// 借りた接続をプールから外す。close は呼ばない（HikariCP が物理接続を別のスレッドで閉じ、PG がその Tx を ROLLBACK する）。
+    /// fatal の後や、pgjdbc の中の例外で接続の状態が分からない時に使う。自前の SqlRead / SqlWrite の handler を書く利用側向け。
+    ///
+    /// WhyNot: evict の後に close を呼ばない。HikariCP 5.1.0 では close が本物の接続に ROLLBACK を送るか、
+    /// `PoolBase.resetConnectionState` の NullPointerException になり、fatal がその NPE にすり替わる（`TestEvictProcedure`）。
+    ///
+    pub def evict(pool: Pool, conn: Connection): Unit \ IO =
+        let Pool.Pool(source) = pool;
+        match Db.catchAll(() -> source.evictConnection(conn)) {
+            case Ok(())     => ()
+            // WhyNot: evict の失敗を投げない。呼ぶ所は元の失敗を投げ直す途中で、それを上書きしたくないため。fatal だけは投げ直す
+            case Err(error) => if (Db.isFatal(error)) Db.rethrowing(Err(error)) else ()
+        }
+
+    ///
     /// 接続を借りる。上限まで使われていて `borrowTimeoutMs` 待っても空かなければ TransientDbErr.timeout、
     /// DB に繋げなければ TransientDbErr.connectionLost。
     ///
@@ -210,7 +225,7 @@ pub mod Sqlfx.Pool {
     /// Tx が要るなら thunk の中で `Tx.withTx(conn, ...)`。制約違反の翻訳（`onConstraint`）は Tx の外で。
     ///
     pub def withConnection(pool: Pool, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
-        runOnConnection(borrow(pool), thunk)
+        runOnConnection(pool, borrow(pool), thunk)
 
     ///
     /// `withConnection` に、この呼び出しだけの借り待ちの上限を付けた形。上限までに借りられなければ
@@ -221,15 +236,17 @@ pub mod Sqlfx.Pool {
         match borrowWithin(pool, borrowTimeoutMs) {
             case None                 => TransientDbErr.timeout(borrowTimeoutMs)
             case Some(Err(transient)) => TransientDbErr.raiseTransient(transient)
-            case Some(Ok(conn))       => runOnConnection(conn, thunk)
+            case Some(Ok(conn))       => runOnConnection(pool, conn, thunk)
         }
 
     ///
-    /// 借りた接続で thunk を走らせ、成功でも失敗でも必ず返す。
+    /// 借りた接続で thunk を走らせ、成功でも失敗でも必ず返す。thunk の JVM の例外は `DbErr` の `Other`。
+    /// fatal は接続を evict してから投げ直す。pgjdbc の中の例外の後は、状態が分からないので返さずに evict する。
     ///
-    def runOnConnection(conn: Connection, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
-        let outcome = DbError.runWithKind(() -> Jdbc.runWithConnection(conn, () -> thunk(conn)));
-        Jdbc.close(conn);
+    def runOnConnection(pool: Pool, conn: Connection, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
+        let watch = { onFatal = () -> evict(pool, conn), driverFailed = Ref.fresh(Static, false) };
+        let outcome = Jdbc.watched(watch, () -> DbError.runWithKind(() -> Jdbc.runWithConnectionWatched(() -> conn, watch, () -> Db.guard(() -> thunk(conn)))));
+        if (Ref.get(watch#driverFailed)) evict(pool, conn) else Jdbc.close(conn);
         match outcome {
             case Ok(value) => value
             case Err(kind) => DbError.raise(kind)
@@ -319,60 +336,74 @@ pub mod Sqlfx.Pool {
     /// `withLazyTxResult` に加えて、BEGIN の直後に onBegin を同じ Tx で 1 回だけ流す（`withLazyTxAfterBegin` と同じ）。
     ///
     pub def withLazyTxResultAfterBegin(pool: Pool, onBegin: Unit -> Unit \ ef2, thunk: Unit -> Result[e, a] \ ef): Result[e, a] \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + (ef2 - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
-        region rc {
-            let slot = Ref.fresh(rc, None);
-            def open() = match Ref.get(slot) {
-                case Some(found) => found
-                case None        => {
-                    let found = borrow(pool);
-                    Tx.begin(found);
-                    Ref.put(Some(found), slot);
-                    // 印を置く SQL は開いたばかりの接続で流す（この時点で slot は埋まっているので、再帰しない）
-                    // WhyNot: onBegin を Db.guard で包まないと、JVM の例外が handler の腕から抜けて ROLLBACK と返却が飛び、
-                    // 借りた接続が Tx を開いたまま漏れる（thunk の例外は最内側の Db.guard が受けるが、ここはその外）
-                    runOn(found, () -> Db.guard(onBegin));
-                    found
+        let slot = Ref.fresh(Static, None);
+        let evictBorrowed = () -> match Ref.get(slot) {
+            case Some(found) => { Ref.put(None, slot); evict(pool, found) }
+            case None        => ()
+        };
+        let watch = { onFatal = evictBorrowed, driverFailed = Ref.fresh(Static, false) };
+        // 借りた直後に slot へ置いてから BEGIN と onBegin を流す。BEGIN が失敗しても後始末が slot の接続を返せる
+        let open = () -> match Ref.get(slot) {
+            case Some(found) => found
+            case None        => {
+                let found = borrow(pool);
+                Ref.put(Some(found), slot);
+                Tx.begin(found);
+                // 印を置く SQL は開いたばかりの接続で流す（この時点で slot は埋まっているので、再帰しない）
+                Jdbc.runWithConnection(found, () -> Db.guard(onBegin));
+                found
+            }
+        };
+        // A: handler の本体の JDBC（Jdbc.runWithConnectionWatched）。B: thunk の最内側の Db.guard。
+        // E: handler の run 全体を外から包む Jdbc.watched。利用側の書き方（SQL を出す関数の中で投げる、closure を record に
+        // 入れる）では例外が B を飛ばして op を受けた handler の所から出てくるので、E がそれを拾う（TestCatchNesting の 9 / 10）
+        let outcome = Jdbc.watched(watch, () -> DbError.runWithKind(() -> Jdbc.runWithConnectionWatched(open, watch, () -> Db.guard(thunk))));
+        let finished = match Ref.get(slot) {
+            case None        => outcome
+            case Some(found) =>
+                if (Ref.get(watch#driverFailed)) { evict(pool, found); discarded(outcome) }
+                else match outcome {
+                    case Ok(Ok(_)) => commitAndClose(pool, found, outcome)
+                    // thunk の Err（業務エラー）も DbErr も巻き戻す
+                    case _         => { rollbackAndClose(pool, found); outcome }
                 }
-            };
-            // WhyNot: Db.guard を `run … with handler SqlRead` の外に置かないのは、handler の外に置いた catch を
-            // 例外が素通りするため（2026-09-08 に実測）。SQL を出した後に投げられた例外も拾えるよう、最内側に置く。
-            // 利用側が thunk の中で張った handler の内側には届かないので、そこは利用側が Db.guard を置く（README §6）。
-            let outcome = DbError.runWithKind(() ->
-                run Db.guard(thunk) with handler SqlRead {
-                    def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
-                } with handler SqlWrite {
-                    def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(open(), sql, params)))
-                    def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(open(), sql, params)))
-                } with handler SqlSavepoint {
-                    def control(command, resume)              = resume(DbError.runWithKind(() -> Jdbc.controlSavepoint(open(), command)))
-                });
-            let finished = match (Ref.get(slot), outcome) {
-                case (None, _)                => outcome
-                case (Some(found), Ok(Ok(_))) => {
-                    let committed = DbError.runWithKind(() -> Tx.commit(found));
-                    Jdbc.close(found);
-                    Result.flatMap(_ -> outcome, committed)
-                }
-                // thunk の Err（業務エラー）も DbErr も巻き戻す
-                case (Some(found), _)         => { Tx.rollback(found); Jdbc.close(found); outcome }
-            };
-            match finished {
-                case Ok(value) => value
-                case Err(kind) => DbError.raise(kind)
+        };
+        match finished {
+            case Ok(value) => value
+            case Err(kind) => DbError.raise(kind)
+        }
+
+    ///
+    /// pgjdbc の中の例外で接続を捨てた後の結果。thunk が失敗を値で受けて `Ok` を返していても、COMMIT していないので失敗にする。
+    ///
+    def discarded(outcome: Result[DbError.DbErrorKind, Result[e, a]]): Result[DbError.DbErrorKind, Result[e, a]] = match outcome {
+        case Ok(Ok(_)) => Err(DbError.DbErrorKind.Other("the connection was discarded after an exception inside the driver, so the transaction was not committed"))
+        case _         => outcome
+    }
+
+    ///
+    /// COMMIT して返す。COMMIT の失敗（直列化失敗など）は `Tx.commit` が ROLLBACK してから値にする。
+    /// COMMIT の最中の fatal は、COMMIT が PG に届いたか分からないので marker を付け、evict してから投げ直す。
+    ///
+    def commitAndClose(pool: Pool, conn: Connection, outcome: Result[DbError.DbErrorKind, b]): Result[DbError.DbErrorKind, b] \ IO =
+        match Db.catchAll(() -> DbError.runWithKind(() -> Tx.commit(conn))) {
+            case Ok(Ok(_))    => { Jdbc.close(conn); outcome }
+            case Ok(Err(kind)) => { Jdbc.close(conn); Err(kind) }
+            case Err(error)   => {
+                evict(pool, conn);
+                if (Db.isFatal(error)) Db.rethrowing(Err(Db.markCommitOutcomeUnknown(error)))
+                else Err(DbError.DbErrorKind.Other(Db.describeThrowable(error)))
             }
         }
 
     ///
-    /// 決まった接続で thunk の SQL を流す（Tx の管理はしない）。
+    /// ROLLBACK して返す。ROLLBACK が失敗した接続は Tx の途中のままなので、返さずに evict する。
     ///
-    def runOn(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
-        run thunk() with handler SqlRead {
-            def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn, sql, params)))
-        } with handler SqlWrite {
-            def execute(sql, params, resume)          = resume(DbError.runWithKind(() -> Jdbc.executeStatement(conn, sql, params)))
-            def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> Jdbc.fetchRows(conn, sql, params)))
-        } with handler SqlSavepoint {
-            def control(command, resume)              = resume(DbError.runWithKind(() -> Jdbc.controlSavepoint(conn, command)))
+    def rollbackAndClose(pool: Pool, conn: Connection): Unit \ IO =
+        match Db.catchAll(() -> Tx.rollback(conn)) {
+            case Ok(true)   => Jdbc.close(conn)
+            case Ok(false)  => evict(pool, conn)
+            case Err(error) => { evict(pool, conn); if (Db.isFatal(error)) Db.rethrowing(Err(error)) else () }
         }
 
 }

@@ -533,9 +533,12 @@ fatal はこの時点では来ない（A / B / C でその場で投げている�
 
 #### 直らない物
 
-2.1 の e（利用側の handler の内側で `Db.guard` を置かずに投げる）と f（利用側の handler の内側の `Db.guard` の fatal）。どちらも、ライブラリ側にそれを拾える位置が無い。
+C4 の実測で書き直した（前の版は「2.1 の e と f は直らない」）。
 
-もう 1 つ、C3 の実測で分かった物: thunk が **Pool の外の handler へ op を投げた後で** 投げ、その経路が 2.2 の「間の try を全部飛ばす」形なら、例外は Pool の外の handler の所から出てきて、Pool の中の catch（B / D / E）のどれにも届かない。利用側が Tx の外に張った handler（ログ、テナント）へ op を投げた直後に投げる形がこれに当たる。`TestPoolLeaks.testPoolLazyTxHandlerInsideWithoutGuardLeaks` は期待を変えずに残す。
+- **f は E で塞がった。** 利用側の handler の内側の `Db.guard` が投げ直した fatal は B に届かないが、op を受けた Pool の handler の所から出てきて E が拾い、evict する（`TestPoolFatal.testFatalInUserHandlerGuard`）。e も、下の条件を満たせば同じく E が拾う
+- **直らないのは「thunk が Tx の外の handler へ op を出した後に投げた物」。** Tx の外の handler から一度でも再開された frame は、その後の例外を（2.2 の C1 / C3 の表の形では）自分の try で拾えない。Pool の catch がある frame（E を含む）もその 1 つになるので、例外は Tx の外の handler の所から出てきて、B / D / E のどれにも届かない。sqlfx 自身の `RawSql` も、README が勧めてきた「main の境界で `RawSql.runWithAllow`」の置き方だと Tx の外の handler になり、`Sql.*` のたびにこの状態になる（`TestPoolFatal.testRawSqlOutsideTxLeaks`）。Pool の中で RawSql の op を外へ中継する handler を張っても直らない（中継する handler の本体の frame が外から再開されるため。C4 で実測）
+- 利用側の決まりにする: **withLazyTx の thunk が op を出す handler（`RawSql`・`TimeZone`・利用側の effect）は、withLazyTx の内側に張る。** 外に張った handler へ op を出す thunk は、例外で接続が漏れうる。README の `RawSql.runWithAllow` の置き方もこれに合わせる（C5）
+- `TestPoolLeaks.testPoolLazyTxHandlerInsideWithoutGuardLeaks`（e）は、RawSql を Tx の外に張る形のままなので、期待を変えずに通る
 
 ### 2.4 evict・ROLLBACK の失敗・COMMIT の途中
 
@@ -551,7 +554,7 @@ fatal はこの時点では来ない（A / B / C でその場で投げている�
   evict した接続の PG 側の Tx は、物理接続が閉じた所で PG が ROLLBACK する
 - **ROLLBACK が失敗したら evict。** 今の `Tx.rollback` は失敗を握り潰して close するので、`autocommit = false` のまま接続がプールに戻りうる。`Tx.rollback` の戻り値を `Bool`（成功したか）にする
 - **接続が既に壊れている時**（SQLState `08` の例外）: HikariCP が自分で evict する。sqlfx 側は何も足さない
-- **COMMIT の途中の fatal:** COMMIT が PG に届いたかは分からない。evict して投げ直す時に、fatal に `Throwable.addSuppressed` で marker の例外（`Sqlfx.CommitOutcomeUnknown`。message に「COMMIT の最中」）を足す。fatal の型は変えない。OOM の中で marker の例外を作れなければ、付けずに元の fatal を投げる（`addSuppressed` の失敗は握り潰す）。nextcms はこの marker を見て `db.tx.outcome: unknown` をログに出す（4 節の N2）
+- **COMMIT の途中の fatal:** COMMIT が PG に届いたかは分からない。evict して投げ直す時に、fatal に `Throwable.addSuppressed` で marker の例外（message の頭が `Sqlfx.CommitOutcomeUnknown` の RuntimeException。Flix から Throwable の子を定義できないため、class でなく message で見分ける。判定は `Db.isCommitOutcomeUnknown`）を足す。fatal の型は変えない。OOM の中で marker の例外を作れなければ、付けずに元の fatal を投げる（`addSuppressed` の失敗は握り潰す）。nextcms はこの marker を見て `db.tx.outcome: unknown` をログに出す（4 節の N2）
 
 ### 2.5 場面ごとの振る舞い
 
@@ -578,7 +581,10 @@ fatal はこの時点では来ない（A / B / C でその場で投げている�
 | `Tx.rollback` | `Unit` | `Bool`（成功したか） |
 | 新しい `Pool.evict(pool, conn)` | 無し | 自前で接続を借りて handler を書く利用側（nextcms の RequestTx）向け。evict だけで close しない |
 | 新しい `Db.catchAll(thunk): Result[Throwable, a]` | 無し（private） | 公開。handler の本体を包む利用側向け |
-| 新しい `Sqlfx.CommitOutcomeUnknown` | 無し | COMMIT の最中の fatal に `addSuppressed` で付く marker の例外 |
+| 新しい `Db.markCommitOutcomeUnknown` / `Db.isCommitOutcomeUnknown` | 無し | COMMIT の最中の fatal に `addSuppressed` で付く marker（message の頭が `Sqlfx.CommitOutcomeUnknown`）と、その判定 |
+| 新しい `Db.fromDriver` / `Db.rethrowing` / `Db.describeThrowable` | 無し（`describeThrowable` は private） | pgjdbc の中から出たかの判定、`catchAll` の結果を戻す（Err は同じ物を投げ直す）、例外の 1 line |
+| 新しい `Jdbc.Watch` / `Jdbc.watched` / `Jdbc.unwatched` / `Jdbc.runWithConnectionWatched` | 無し | A と E の共通の口。自前の SqlRead / SqlWrite の handler を書く利用側（nextcms の RequestTx）もこれで包める |
+| `Tx.withTx` | thunk の `SQLException` 以外の例外はそのまま抜ける | fatal でない物は `DbErr.other` にして ROLLBACK。fatal は ROLLBACK を送らずに投げ直す |
 
 型の上で変わるのは `Tx.rollback` だけで、他は振る舞いの変化と足した物。
 
@@ -611,7 +617,7 @@ Proxy は本物の接続への呼び出しを記録し、「evict の後に ROLL
 | 2 | `fatal-after-execute` の INSERT | 同上 |
 | 3 | `fatal-on-prepare` の SELECT が Tx の最初の文 | 同上（evict → close の手順の spike では NPE にすり替わった件） |
 | 4 | onBegin で `throw OutOfMemoryError` | 同上（同） |
-| 5 | 利用側の handler の内側の `Db.guard` の中で INSERT → fatal | OOM が抜け、**active 1、次は Timeout**（2.1 の f。直らない事の記録） |
+| 5 | 利用側の handler の内側の `Db.guard` の中で INSERT → fatal | 1 と同じ（C4 の実測。E が拾う。前の版の期待は「active 1、次は Timeout」） |
 | 6 | `Db.attempt(() -> Tx.withSavepoint("sp", () -> Db.guard(() -> { INSERT; OOM })))` | 1 と同じ |
 | 7 | 6 から `Db.guard` を外す | 1 と同じ（0.5.0 は active 1） |
 | 8 | 7 の OOM を `RuntimeException` に | 投げ直さない、`Other`、0 row、active 0、pid は同じ（0.5.0 は active 1） |
@@ -621,13 +627,21 @@ Proxy は本物の接続への呼び出しを記録し、「evict の後に ROLL
 | 12 | `driver-runtime-after-execute` | 投げ直さない、`Other`、0 row、active 0、pid は別（evict） |
 | 13 | `runtime-after-execute` | 投げ直さない、`Other`、0 row、active 0、**pid は同じ**（ROLLBACK して返す） |
 | 14 | thunk で `RuntimeException` | 投げ直さない、`Other`、0 row、active 0、pid は同じ |
-| 15 | `failSetAutoCommit` | `Other`、active 0、次は Ok（2.1 の k。0.5.0 は active 1） |
+| 15 | `failSetAutoCommit` | `Other`、active 0、次は Ok（2.1 の k。0.5.0 は active 1）。autocommit のままの接続への ROLLBACK は失敗するので evict する（C4 の実測） |
 | 16 | `failRollback` で thunk が業務の `Err` | `Err` が返る、active 0、pid は別 |
 | 17 | `Retry.withRetry(3, ...)` の中で 1 回目は Transient、2 回目で 1 と同じ | OOM、thunk を呼んだ回数 2、active 0 |
 | 18 | `Pool.withConnection` の thunk で fatal / `fatal-after-execute` | 1 と同じ |
 | 19 | `Pool.withConnection` の thunk で `RuntimeException` | `Other`、active 0（0.5.0 は例外のまま抜けて active 1） |
 | 20 | `OutOfMemoryError` を `CompletionException` で包んで投げる | 1 と同じ（cause の連鎖） |
 | 21 | 2 を 20 回続ける | 全部 OOM、NPE 0（spike と同じ数え方） |
+| E1 | 別の関数の中で INSERT → OOM | 1 と同じ（C4 で足した。B を飛ばし E が拾う） |
+| E2 | record に入れた closure の中で INSERT → OOM | 1 と同じ（同上） |
+| E3 | 別の関数の中で INSERT → `RuntimeException` | 14 と同じ（同上） |
+| A1 | `Db.attempt(runtime-after-execute の INSERT)` の後で thunk が続けて Ok | ok、1 row、同じ接続（A が SQL の失敗として値で返す。A を外すと E が thunk ごと止めるので落ちる） |
+| A2 | `Db.attempt(driver-runtime-after-execute)` の後で thunk が続けて Ok | other、0 row、作り直し（COMMIT しない） |
+| L1 | `RawSql.runWithAllow` を Tx の外に張り、別の関数の中で INSERT → OOM | OOM は抜けるが active 1、次は Timeout（2.3 の「直らない物」の記録） |
+
+2.7 の場面は、L1 の他は thunk の内側で `RawSql.runWithAllow` を張る（2.3 の決まり）。C4 では catch を 1 つずつ外して、A（A1 が落ちる）・E（4 件）・C（11 が落ちる）・evict（4 件）・D（`TestRethrowUnderRun`）のどれも検知される事を見た。
 
 今の `TestPoolLeaks` の全テストは期待を変えずに通る事（e の記録のテストも含む）。
 

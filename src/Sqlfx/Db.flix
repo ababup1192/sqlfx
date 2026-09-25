@@ -4,6 +4,7 @@ pub mod Sqlfx.Db {
     use Sqlfx.DbError
     use Sqlfx.TransientDbErr
 
+    import java.lang.RuntimeException
     import java.lang.StackOverflowError
     import java.lang.StackTraceElement
     import java.lang.Throwable
@@ -140,9 +141,37 @@ pub mod Sqlfx.Db {
         String.startsWith(prefix = "org.postgresql.", name)
 
     ///
+    /// COMMIT の最中に fatal を受けた印の message の頭。
+    ///
+    def commitOutcomeUnknownPrefix(): String = "Sqlfx.CommitOutcomeUnknown"
+
+    ///
+    /// COMMIT の最中に受けた fatal に、COMMIT が PG に届いたか分からない事を示す marker を `addSuppressed` で足して返す。
+    /// fatal の型は変えない。marker を作れない（OOM の中で new できない）時は、付けずに元の物を返す。
+    ///
+    /// WhyNot: marker を Java の例外の class にしないのは、Flix から Throwable の子を定義できないため。
+    /// message の頭で見分け、判定は `isCommitOutcomeUnknown` に閉じる。
+    ///
+    pub def markCommitOutcomeUnknown(error: Throwable): Throwable \ IO =
+        discard catchAll(() -> {
+            let marker: Throwable = checked_cast(new RuntimeException("${commitOutcomeUnknownPrefix()}: the connection failed in the middle of COMMIT, so whether the transaction was committed is unknown"));
+            error.addSuppressed(marker)
+        });
+        error
+
+    ///
+    /// `markCommitOutcomeUnknown` の marker が付いているか。利用側はこれで「COMMIT の結果が分からない」をログに出す。
+    ///
+    pub def isCommitOutcomeUnknown(error: Throwable): Bool \ IO =
+        Array.toList(error.getSuppressed()) |> List.exists(suppressed -> {
+            let message: String = suppressed.getMessage();
+            not Object.isNull(message) and String.startsWith(prefix = commitOutcomeUnknownPrefix(), message)
+        })
+
+    ///
     /// 例外の 1 行。message があればそれ、null ならクラス名（VerifyError は message が null の事がある）。
     ///
-    def describeThrowable(error: Throwable): String \ IO =
+    pub def describeThrowable(error: Throwable): String \ IO =
         let message: String = error.getMessage();
         if (Object.isNull(message)) error.getClass().getName() else message
 

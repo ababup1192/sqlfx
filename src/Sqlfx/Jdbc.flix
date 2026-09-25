@@ -3,6 +3,7 @@
 ///
 pub mod Sqlfx.Jdbc {
 
+    use Sqlfx.Db
     use Sqlfx.DbErr
     use Sqlfx.DbError
     use Sqlfx.JdbcConvert
@@ -65,28 +66,84 @@ pub mod Sqlfx.Jdbc {
         }
 
     ///
+    /// handler の本体と、handler の `run` 全体で JVM の例外を拾った時の扱い。Tx の入口（Pool / Tx / withConnection）が渡す。
+    ///
+    /// - `onFatal`: fatal を拾った時に、投げ直す前に呼ぶ（借りた接続の evict、自前の接続なら close）
+    /// - `driverFailed`: fatal でない例外が pgjdbc の中から出た時に true にする。接続の protocol の状態が分からないので、
+    ///   受けた側は ROLLBACK を送らずに接続を捨てる
+    ///
+    pub type alias Watch = { onFatal = Unit -> Unit \ IO, driverFailed = Ref[Bool, Static] }
+
+    ///
+    /// fatal を拾っても何もしない（接続が呼び手の物で、捨てられない所）。
+    ///
+    pub def unwatched(): Watch \ IO = { onFatal = () -> (), driverFailed = Ref.fresh(Static, false) }
+
+    ///
+    /// thunk を走らせ、JVM の例外を拾う。fatal は `onFatal` を呼んでから同じ物を投げ直す（値にしない）。
+    /// fatal でない物は `DbErrorKind.Other` の値にし、pgjdbc の中から出た物なら `driverFailed` を立てる。
+    ///
+    /// handler の本体（`resume` の前）と、handler の `run` 全体を外から包むのに使う。後者は、利用側の書き方で
+    /// thunk の中の catch（`Db.guard`）を例外が飛ばした時に、op を受けた Pool の handler の所で拾う網。
+    ///
+    pub def watched(watch: Watch, thunk: Unit -> Result[DbError.DbErrorKind, a] \ ef): Result[DbError.DbErrorKind, a] \ ef + IO =
+        match Db.catchAll(thunk) {
+            case Ok(result) => result
+            case Err(error) =>
+                if (Db.isFatal(error)) {
+                    (watch#onFatal)();
+                    Db.rethrowing(Err(error))
+                } else {
+                    if (Db.fromDriver(error)) Ref.put(true, watch#driverFailed) else ();
+                    Err(DbError.DbErrorKind.Other(Db.describeThrowable(error)))
+                }
+        }
+
+    ///
     /// 1 本の接続で fetch / execute / SAVEPOINT の命令を実行する。結果は即時 materialize する。
     /// 失敗は値（DbErrorKind）で継続に渡し、呼び出し側の `Sql.*` / `Tx.withSavepoint` が op にする。継続は必ず 1 回呼ぶ。
+    /// JDBC の中の fatal は投げ直す（接続は呼び手の物なので、捨てるのも呼び手）。
     ///
     pub def runWithConnection(conn: Connection, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + IO =
+        runWithConnectionWatched(() -> conn, unwatched(), thunk)
+
+    ///
+    /// `runWithConnection` の、接続を最初の SQL で取りに行く形。handler の本体の JDBC は `watched` で包み、
+    /// `resume` は拾った後で呼ぶ（`resume` を try の中で呼ぶと、その先で thunk が投げた物を handler が拾ってしまう）。
+    ///
+    pub def runWithConnectionWatched(connect: Unit -> Connection \ ef2, watch: Watch, thunk: Unit -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + (ef2 - {TransientDbErr, DbErr}) + IO =
         run {
             thunk()
         } with handler SqlRead {
-            def fetch(sql, params, resume) = resume(DbError.runWithKind(() -> fetchRows(conn, sql, params)))
+            def fetch(sql, params, resume) = {
+                let result = watched(watch, () -> DbError.runWithKind(() -> fetchRows(connect(), sql, params)));
+                resume(result)
+            }
         } with handler SqlWrite {
-            def execute(sql, params, resume) = resume(DbError.runWithKind(() -> executeStatement(conn, sql, params)))
-            def executeReturning(sql, params, resume) = resume(DbError.runWithKind(() -> fetchRows(conn, sql, params)))
+            def execute(sql, params, resume) = {
+                let result = watched(watch, () -> DbError.runWithKind(() -> executeStatement(connect(), sql, params)));
+                resume(result)
+            }
+            def executeReturning(sql, params, resume) = {
+                let result = watched(watch, () -> DbError.runWithKind(() -> fetchRows(connect(), sql, params)));
+                resume(result)
+            }
         } with handler SqlSavepoint {
-            def control(command, resume) = resume(DbError.runWithKind(() -> controlSavepoint(conn, command)))
+            def control(command, resume) = {
+                let result = watched(watch, () -> DbError.runWithKind(() -> controlSavepoint(connect(), command)));
+                resume(result)
+            }
         }
 
     ///
     /// 接続を開いて thunk を走らせ、成功でも失敗でも必ず閉じる。失敗はそのまま再送出する。
     /// 「開く → runWithConnection → 閉じる」を毎回書かないための入口。Tx が要るなら thunk の中で `Tx.withTx` を呼ぶ。
+    /// thunk の JVM の例外は `DbErr` の `Other`。fatal は接続を閉じてから投げ直す。pgjdbc の中から出た例外の後も閉じる。
     ///
     pub def withConnection(config: ConnectionConfig, thunk: Connection -> a \ ef): a \ (ef - {SqlRead, SqlWrite, SqlSavepoint}) + {IO, TransientDbErr, DbErr} =
         let conn = connect(config);
-        let outcome = DbError.runWithKind(() -> runWithConnection(conn, () -> thunk(conn)));
+        let watch = { onFatal = () -> close(conn), driverFailed = Ref.fresh(Static, false) };
+        let outcome = watched(watch, () -> DbError.runWithKind(() -> runWithConnectionWatched(() -> conn, watch, () -> Db.guard(() -> thunk(conn)))));
         close(conn);
         match outcome {
             case Ok(value) => value

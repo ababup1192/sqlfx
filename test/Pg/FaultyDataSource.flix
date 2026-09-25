@@ -54,9 +54,9 @@ mod FaultyDataSource {
     pub def noFaults(): Faults = { failSetAutoCommit = false, failRollback = false, fatalOnCommit = false }
 
     ///
-    /// 組んだプールと、本物の接続への呼び出しの記録（新しい物が先頭）。
+    /// 組んだプールと、本物の接続への呼び出しの記録（新しい物が先頭）と、開いた物理接続の数。
     ///
-    pub type alias Faulty = { pool = Pool.Pool, calls = Ref[List[String], Static] }
+    pub type alias Faulty = { pool = Pool.Pool, calls = Ref[List[String], Static], opened = Ref[Int32, Static] }
 
     ///
     /// 大きさ 1・借り待ち 300 ms のプールを、失敗する DataSource で組む。
@@ -69,7 +69,7 @@ mod FaultyDataSource {
         hikari.setMaximumPoolSize(1);
         hikari.setConnectionTimeout(300i64);
         hikari.setInitializationFailTimeout(-1i64);
-        { pool = Pool.Pool(new HikariDataSource(hikari)), calls = calls }
+        { pool = Pool.Pool(new HikariDataSource(hikari)), calls = calls, opened = opened }
 
     ///
     /// 記録を古い順に。
@@ -85,6 +85,21 @@ mod FaultyDataSource {
             |> List.drop(after)
             |> List.filter(call -> List.exists(name -> call == "c${index}:${name}", List#{"rollback", "setAutoCommit(true)", "setAutoCommit(false)", "clearWarnings", "commit"}))
             |> List.length
+
+    ///
+    /// 開いた物理接続の数。
+    ///
+    pub def openedCount(faulty: Faulty): Int32 \ IO =
+        Ref.get(faulty#opened)
+
+    ///
+    /// 物理接続 `index` に BEGIN（最初の setAutoCommit(false)）の後で送った後始末の呼び出し（ROLLBACK / commit /
+    /// setAutoCommit(true) / clearWarnings）があるか。evict した接続は false、ROLLBACK して返した接続は true。
+    ///
+    pub def cleanedUpAfterBegin(index: Int32, faulty: Faulty): Bool \ IO =
+        let mine = callsOf(faulty) |> List.filter(String.startsWith(prefix = "c${index}:"));
+        let afterBegin = mine |> List.dropWhile(call -> call != "c${index}:setAutoCommit(false)") |> List.drop(1);
+        List.exists(call -> List.exists(name -> call == "c${index}:${name}", List#{"rollback", "commit", "setAutoCommit(true)", "clearWarnings"}), afterBegin)
 
     ///
     /// 本物の PGSimpleDataSource を包む DataSource。getConnection のたびに物理接続の番号を 1 つ進める。
