@@ -7,6 +7,7 @@
 pub mod Sqlfx.Q.QParser {
 
     use Sqlfx.Q.QueryDef
+    use Sqlfx.Q.SqlTokens
     use Sqlfx.Q.SqlType
 
     use Sqlfx.Q.QueryDef.Shape
@@ -199,6 +200,10 @@ pub mod Sqlfx.Q.QParser {
             case '-' :: '-' :: rest =>
                 let comment = List.takeWhile(ch -> ch != '\n', rest);
                 bodyLoop(advance(2 + List.length(comment), cursor), text, acc, false)
+            // `/* */` と dollar quote は中の :name / {slot} / ' を見ずに、そのまま PG に出す SQL に残す
+            case '/' :: '*' :: rest => copyVerbatim(2 + SqlTokens.blockCommentLength(rest), cursor, text, acc)
+            case '$' :: _ if Option.nonEmpty(SqlTokens.dollarQuoteLength(cursor#rest)) =>
+                copyVerbatim(SqlTokens.dollarQuoteLength(cursor#rest) |> Option.getWithDefault(1), cursor, text, acc)
             case ':' :: ':' :: rest => bodyLoop({ rest = rest, pos = cursor#pos + 2 }, ':' :: ':' :: text, acc, false)
             case ':' :: rest if startsWithIdent(rest) =>
                 let (name, afterName) = takeIdent({ rest = rest, pos = cursor#pos + 1 });
@@ -211,6 +216,13 @@ pub mod Sqlfx.Q.QParser {
             case '{' :: _ => Err(ParseError.Unexpected(cursor#pos, "slot name after '{'"))
             case ch :: rest => bodyLoop({ rest = rest, pos = cursor#pos + 1 }, ch :: text, acc, false)
         }
+
+    ///
+    /// 先頭の length 文字を素の SQL にそのまま足して、続きを読む。
+    ///
+    def copyVerbatim(length: Int32, cursor: Cursor, text: List[Char], acc: List[Segment]): Result[ParseError, (List[Segment], Cursor)] =
+        let copied = List.take(length, cursor#rest);
+        bodyLoop(advance(length, cursor), List.reverse(copied) ::: text, acc, false)
 
     ///
     /// 読みかけの素の SQL を断片にして積む。空なら何もしない。

@@ -51,6 +51,14 @@ def testScopeRejectsMissingColumn(): Unit \ Assert =
             + "query b(id: Int64) -> one { SELECT id FROM entries WHERE id = :id }\n"
             + "query c(id: Int64) -> exec { DELETE FROM entries WHERE id = :id }"))
 
+/// scope のカラムの名前が `/* */` のコメントか dollar quote の中にしか無い query は止まる（0.5.0 では通っていた）。
+@Test
+def testScopeIgnoresCommentAndDollarQuote(): Unit \ Assert =
+    Assert.assertEq(
+        expected = (Err("Unscoped(a, entries, project_id)"), Err("Unscoped(b, entries, project_id)")),
+        (checkSource("query a(id: Int64) -> one { SELECT id FROM entries /* project_id */ WHERE id = :id }"),
+         checkSource("query b(id: Int64) -> one { SELECT id, $$project_id$$ AS note FROM entries WHERE id = :id }")))
+
 // ---- `// unscoped:` の印 ----
 
 def byHash(): String = "query byHash(h: String) -> one { SELECT id FROM entries WHERE title = :h }\n"

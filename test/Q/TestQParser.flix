@@ -133,3 +133,22 @@ def testBodyDropsLineComments(): Unit \ Assert =
     let body = QParser.parseFile("query f(id: Int64) -> one {\n  -- don't use :x here\n  SELECT id FROM t WHERE id = :id -- trailing\n}")
         |> Result.map(List.flatMap(queryDef -> queryDef#body));
     Assert.assertEq(expected = Ok(List#{Segment.Text("SELECT id FROM t WHERE id = "), Segment.ParamRef("id")}), body)
+
+/// 本文の `/* */` と dollar quote の中の `:name` / `{slot}` / `'` は見ない。どちらも PG に出す SQL には残す。
+///
+///   /* it's :projectId ( */ … project_id = :projectId   → ParamRef は外の 1 つだけ、' で引用に入らない
+///   $$it's :x {y}$$                                      → ParamRef も SlotRef も無し
+@Test
+def testParseBodyIgnoresCommentAndDollarQuote(): Unit \ Assert =
+    let source =
+        "query a(projectId: Int64) -> many {\n"
+            + "    SELECT id FROM entries /* it's :projectId ( */ WHERE project_id = :projectId\n"
+            + "}\n"
+            + "query b() -> one {\n"
+            + "    SELECT $$it's :x {y}$$ AS s\n"
+            + "}\n";
+    let bodies = QParser.parseFile(source) |> Result.map(List.map(queryDef -> queryDef#body));
+    Assert.assertEq(expected = Ok(List#{
+        List#{Segment.Text("SELECT id FROM entries /* it's :projectId ( */ WHERE project_id = "), Segment.ParamRef("projectId")},
+        List#{Segment.Text("SELECT $$it's :x {y}$$ AS s")}
+    }), bodies)
