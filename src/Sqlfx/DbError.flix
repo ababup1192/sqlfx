@@ -1,5 +1,6 @@
 pub mod Sqlfx.DbError {
 
+    use Sqlfx.Db
     use Sqlfx.DbErr
     use Sqlfx.TransientDbErr
 
@@ -65,15 +66,17 @@ pub mod Sqlfx.DbError {
 
     ///
     /// 2 つのエフェクトをまとめて値に落とす唯一のハンドラ。他の「Result にする」関数はこれから作る。
+    /// thunk の中で投げた JVM の例外は `run` の直下で拾い、`run` を抜けてから同じ物を投げ直す（`Db.rethrowing`）。
     ///
     pub def runWithKind(thunk: Unit -> a \ ef): Result[DbErrorKind, a] \ ef - {TransientDbErr, DbErr} =
-        run {
-            Ok(thunk())
-        } with handler TransientDbErr {
-            def raise(kind, _resume) = Err(kind)
-        } with handler DbErr {
-            def raise(kind, _resume) = Err(kind)
-        }
+        let outcome = run {
+                Ok(Db.catchAll(thunk))
+            } with handler TransientDbErr {
+                def raise(kind, _resume) = Err(kind)
+            } with handler DbErr {
+                def raise(kind, _resume) = Err(kind)
+            };
+        Result.map(Db.rethrowing, outcome)
 
     ///
     /// 制約違反の制約名。UNIQUE / FK / CHECK だけ。notNullViolation は列名なので None。

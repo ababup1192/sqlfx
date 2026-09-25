@@ -467,9 +467,21 @@ nextcms の `test/app/TestJvmCatchNesting.flix` の表に、scratchpad の spike
 | handler の本体の中に try を置き、その中で JDBC を呼ぶ（thunk が外の handler に op を投げた後でも） | 拾える（spike S1-A / B / C2） |
 | handler の本体の try の中で `resume` を呼ぶ | **形による**（spike S1-E は素通り）。`resume` の後で thunk が外の handler へ op を投げていれば素通り、投げていなければ本体の try が thunk の例外まで拾う（C1 の `TestCatchNesting` で 3 通りを実測。spike S1-E の「素通り」は前者の形にだけ当たる）。拾う時は利用側の例外を handler が飲み込むので、どちらにしても網にならない |
 
+C1 / C3 で足した形（0.75.3 と 0.76.0 で同じ。`test/Db/TestCatchNesting.flix` の 9 / 10）:
+
+| 形 | 拾えるか |
+|---|---|
+| op と throw を lambda に直に書かず、別の関数（def）の中に書く | **間の try を全部飛ばす** |
+| op を受けた handler と throw の間に、catch を直下に持たない `run`・自己再帰の関数・record / Ref / List から取り出した closure の呼び出しがある | **間の try を全部飛ばす** |
+| 上の 2 つで、op を受けた handler の `run` を外から包む try | 拾える（例外は op を受けた handler の `resume` の所から出てくる） |
+| 上の 2 つで、op を受けたのが Pool の外の handler | Pool の中のどの try にも届かない |
+
+値は正しく戻る（飛ばすのは例外だけ）。飛ばす形は、利用側の普通の書き方（リゾルバを record に入れる、SQL を出す関数の中で投げる）に含まれる。2.2 の上の表の「拾える」は、op と throw を lambda に直に書いた形でしか成り立たない。
+
 ここから決まる事:
 
-- `withLazyTx` の `run` を外から try で包んでも網にならない（4 番目）
+- `withLazyTx` の `run` を外から try で包んでも、最後の op が Pool の外の handler 宛てなら網にならない（4 番目）。最後の op が Pool の handler 宛てなら、形を問わず拾える（10）。これを E として足す
+- `Db.guard`（B）と D は、拾える形でだけ効く（上の表）。どちらも「届けば拾う」物で、網の本体は E
 - handler の本体の throw は、本体の中に try を置けば拾える。**`resume` は try を抜けてから呼ぶ**
 - thunk の本体の throw は、今の `Db.guard` の位置（一番内側の handler の直下）で拾える
 - sqlfx が利用側の thunk を包んで張る `run`（j）は、**その `run` の直下に catch を置き、`run` を抜けてから投げ直せば**、3 番目の形で外側の `Db.guard` に届く
@@ -491,7 +503,8 @@ WhyNot: fatal をいったん値にして Tx の出口で投げ直す形（nextc
 | A. handler の本体（`withLazyTx*` / `Pool.withConnection*` / `Jdbc.withConnection` / `Tx.withTx` の SqlRead / SqlWrite / SqlSavepoint の全部の口） | `let r = catchAll(() -> DbError.runWithKind(() -> Jdbc.fetchRows(open(), ...)))`。try の外で `resume` | fatal: 借りていれば evict、投げ直す。fatal でなく pgjdbc の中から出た物: 「接続の状態が分からない」フラグを立て、`Err(Other(...))` で resume。それ以外: `Err(Other(...))` で resume |
 | B. thunk と onBegin（今の `Db.guard` の位置） | ライブラリの中だけの `guardOn(conn, thunk)`（接続の `Ref` を閉じ込めた `Db.guard`） | fatal: 借りていれば evict、投げ直す。fatal でない: 今と同じ `DbErr.other` |
 | C. 後始末（`Tx.commit` / `Tx.rollback`） | `catchAll` で包む | fatal: evict、投げ直す（COMMIT 中なら 2.4 の marker を付ける）。ROLLBACK の失敗: evict |
-| D. sqlfx が利用側の thunk を包んで張る `run`（`DbError.runWithKind` と、それを使う `runWithFailure` / `Db.attempt` / `onConstraintWith` / `Tx.withSavepoint`、`Retry.withRetry*`、`RawSql.runWithAllow`） | `run { Ok(catchAll(thunk)) } with handler ...`（catch を `run` の直下に）。`run` を抜けてから `Err` の `Throwable` を投げ直す | 変換しない（fatal もそうでない物もそのまま投げ直す）。外側の A / B に届かせるためだけの catch |
+| D. sqlfx が利用側の thunk を包んで張る `run`（`DbError.runWithKind` と、それを使う `runWithFailure` / `Db.attempt` / `onConstraintWith` / `Tx.withSavepoint`、`Retry.withRetry*`、`RawSql.runWithAllow`。C3 で `DbErr.runWithResult` / `TransientDbErr.runWithResult`（Retry が使う）/ `TimeZone.runWith` / `DbTest.*` も足した。sqlfx が catch を直下に持たない `run` を利用側の経路に置かないため） | `run { Ok(catchAll(thunk)) } with handler ...`（catch を `run` の直下に）。`run` を抜けてから `Err` の `Throwable` を投げ直す（`Db.rethrowing`） | 変換しない（fatal もそうでない物もそのまま投げ直す）。外側の A / B に届かせるためだけの catch。`Retry` は `retryLoop` の自己再帰が経路に挟まるので、中の D には届かない（C3 の実測）。Retry が包む Tx の中は E が受ける |
+| E. Pool の handler の `run` を外から包む（`withLazyTx*` / `Pool.withConnection*` / `Jdbc.withConnection` / `Tx.withTx`） | `catchAll(() -> run { ... } with handler SqlRead ...)` | B と同じ（fatal: 借りていれば evict して投げ直す。fatal でない: `DbErr.other`）。C3 の実測で足した物。B と D が届かない形（2.2 の C1 / C3 の表）でも、最後の op が Pool の handler 宛てなら必ずここに来る |
 
 「pgjdbc の中から出た」は、例外の class 名か stack trace の先頭の frame の class 名が `org.postgresql.` で始まる事で決める。pgjdbc の中の `RuntimeException` は protocol の途中で出うるので、その接続は捨てる。`JdbcConvert` のような sqlfx 側の変換の失敗は、接続の protocol に触っていないので、今のとおり ROLLBACK して返す。
 
@@ -520,7 +533,9 @@ fatal はこの時点では来ない（A / B / C でその場で投げている�
 
 #### 直らない物
 
-2.1 の e（利用側の handler の内側で `Db.guard` を置かずに投げる）と f（利用側の handler の内側の `Db.guard` の fatal）。どちらも、ライブラリ側にそれを拾える位置が無い。`TestPoolLeaks.testPoolLazyTxHandlerInsideWithoutGuardLeaks` は期待を変えずに残す。
+2.1 の e（利用側の handler の内側で `Db.guard` を置かずに投げる）と f（利用側の handler の内側の `Db.guard` の fatal）。どちらも、ライブラリ側にそれを拾える位置が無い。
+
+もう 1 つ、C3 の実測で分かった物: thunk が **Pool の外の handler へ op を投げた後で** 投げ、その経路が 2.2 の「間の try を全部飛ばす」形なら、例外は Pool の外の handler の所から出てきて、Pool の中の catch（B / D / E）のどれにも届かない。利用側が Tx の外に張った handler（ログ、テナント）へ op を投げた直後に投げる形がこれに当たる。`TestPoolLeaks.testPoolLazyTxHandlerInsideWithoutGuardLeaks` は期待を変えずに残す。
 
 ### 2.4 evict・ROLLBACK の失敗・COMMIT の途中
 
@@ -528,8 +543,8 @@ fatal はこの時点では来ない（A / B / C でその場で投げている�
 
   | 手順 | 結果 |
   |---|---|
-  | evict → close（Tx の中で書いた後） | 本物の接続に ROLLBACK が送られる。ROLLBACK が止まると close も 3 秒止まる |
-  | evict → close（Tx の中、まだ書いていない） | `PoolBase.resetConnectionState` が `NullPointerException`。fatal がこの NPE にすり替わる（spike の T3 / T4） |
+  | evict → close（Tx の中で書いた後） | 本物の接続に ROLLBACK が送られる。ROLLBACK が止まると close も 3 秒止まる。close 自体は下の NPE にもなる（C1 の実測） |
+  | evict → close（Tx の中、まだ書いていない） | `PoolBase.resetConnectionState` が `NullPointerException`。fatal がこの NPE にすり替わる（spike の T3 / T4）。C1 の実測では、書いた後・書く前のどちらも、HikariCP が evict した物理接続を別のスレッドで閉じるのとの競りで ok と NPE のどちらにもなった（`TestEvictProcedure`） |
   | 物理接続の abort → close | pgjdbc の「既にクローズされています」の例外 |
   | **evict だけ** | どの組み合わせでも active=0、次の借りは新しい backend pid、本物の接続への ROLLBACK / setAutoCommit / clearWarnings の呼び出しは 0 |
 
@@ -711,6 +726,7 @@ nextcms 側（N1〜N5）は sqlfx の 0.6.0 の tag を打った後に、4 節�
 - **WITH の無い query の scope の粗さ**（副問い合わせ、SELECT リストだけ、`USING`、カンマの続き、INSERT ... SELECT の読み元）は、C7 の前の計測の後に決めるまで残る。RLS が後ろにある
 - **COMMIT の最中の fatal では、COMMIT が PG に届いたか分からない。** marker（suppressed）を付けて投げるだけで、結果は分からないまま
 - **「pgjdbc の中から出た」の判定は class 名と stack trace の先頭で見ている。** pgjdbc が内部の例外を別の包み方に変えると判定が外れ、protocol の途中の接続を ROLLBACK で返す事になる。HikariCP の `08` の evict が後ろの網
+- **catch が届くかは、利用側の書き方（op と throw を別の関数に書く、closure を record に入れる）でも変わる**（2.2 の C1 / C3 の表）。E は最後の op が Pool の handler 宛ての時だけの網で、Pool の外の handler 宛ての op の後に投げた物は漏れうる
 - **catch の届く位置は Flix のコンパイラのバージョンで変わりうる。** 0.75.3 と 0.76.0 では同じ結果だった。コンパイラを上げるたびに `TestCatchNesting` と `TestPoolFatal` を回す
 - **evict の後の物理接続の close は HikariCP の中で非同期。** 閉じるまでの間、PG 側の Tx が残る。N3 の `client_connection_check_interval` と既にある `idle_in_transaction_session_timeout` が後ろの網
 - **touch を 1 文にすると、`upsertContent` の返す数の意味が変わる**（`entry_contents` の数 → `entries` の数）。N4 で query の doc コメントに書く

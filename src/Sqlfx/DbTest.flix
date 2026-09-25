@@ -1,5 +1,10 @@
+///
+/// DB 無しのテスト用の handler。どれも thunk の中で投げた JVM の例外を `run` の直下で拾い、`run` を抜けてから同じ物を投げ直す
+/// （`Db.rethrowing`。catch を直下に持たない `run` を利用側の経路に置かないため）。
+///
 pub mod Sqlfx.DbTest {
 
+    use Sqlfx.Db
     use Sqlfx.DbError
     use Sqlfx.Row
     use Sqlfx.Savepoint
@@ -16,25 +21,27 @@ pub mod Sqlfx.DbTest {
     /// SAVEPOINT の命令（`Tx.withSavepoint`）は全部通す。
     ///
     pub def runWithRows(rows: List[Row], thunk: Unit -> a \ ef): a \ ef - {SqlRead, SqlSavepoint} =
-        run {
-            thunk()
+        let outcome = run {
+            Db.catchAll(thunk)
         } with handler SqlRead {
             def fetch(_sql, _params, resume) = resume(Ok(rows))
         } with handler SqlSavepoint {
             def control(_command, resume) = resume(Ok(()))
-        }
+        };
+        Db.rethrowing(outcome)
 
     ///
     /// SQL 文字列ごとに返す rows を変える。`rowsFor` が None を返した SQL は空の結果。
     ///
     pub def runWithTable(rowsFor: String -> Option[List[Row]], thunk: Unit -> a \ ef): a \ ef - {SqlRead, SqlSavepoint} =
-        run {
-            thunk()
+        let outcome = run {
+            Db.catchAll(thunk)
         } with handler SqlRead {
             def fetch(sql, _params, resume) = resume(Ok(rowsFor(sql) |> Option.getWithDefault(Nil)))
         } with handler SqlSavepoint {
             def control(_command, resume) = resume(Ok(()))
-        }
+        };
+        Db.rethrowing(outcome)
 
     ///
     /// 発行した Statement を順に記録して結果と一緒に返す。SELECT には rows、書き込みには affected を返す。
@@ -52,8 +59,8 @@ pub mod Sqlfx.DbTest {
         region rc {
             let log = Ref.fresh(rc, Nil);
             let record = statement -> Ref.put(statement :: Ref.get(log), log);
-            let result = run {
-                thunk()
+            let outcome = run {
+                Db.catchAll(thunk)
             } with handler SqlRead {
                 def fetch(sql, params, resume) = {
                     record({ sql = sql, params = params });
@@ -74,6 +81,7 @@ pub mod Sqlfx.DbTest {
                     resume(Ok(()))
                 }
             };
+            let result = Db.rethrowing(outcome);
             (result, Ref.get(log) |> List.reverse)
         }
 
@@ -82,12 +90,13 @@ pub mod Sqlfx.DbTest {
     /// 制約違反の翻訳（uniqueViolation → 業務エラー等）を DB 無しで確かめるのに使う。
     ///
     pub def runFailingWrite(kind: DbError.DbErrorKind, thunk: Unit -> a \ ef): a \ ef - SqlWrite =
-        run {
-            thunk()
+        let outcome = run {
+            Db.catchAll(thunk)
         } with handler SqlWrite {
             def execute(_sql, _params, resume) = resume(Err(kind))
             def executeReturning(_sql, _params, resume) = resume(Err(kind))
-        }
+        };
+        Db.rethrowing(outcome)
 
     ///
     /// Sql を包み、発行する文を Logger へ流してから外側の Sql へそのまま転送する。
@@ -95,8 +104,8 @@ pub mod Sqlfx.DbTest {
     /// WhyNot: パラメータの値をログに出さないのは、password や個人情報が平文で残るから。SQL と件数だけ出す。
     ///
     pub def runLogging(thunk: Unit -> a \ ef): a \ ef + {SqlRead, SqlWrite, Logger} =
-        run {
-            thunk()
+        let outcome = run {
+            Db.catchAll(thunk)
         } with handler SqlRead {
             def fetch(sql, params, resume) = {
                 Logger.debug("fetch ${sql} (${List.length(params)} params)");
@@ -111,6 +120,7 @@ pub mod Sqlfx.DbTest {
                 Logger.debug("executeReturning ${sql} (${List.length(params)} params)");
                 resume(SqlWrite.executeReturning(sql, params))
             }
-        }
+        };
+        Db.rethrowing(outcome)
 
 }

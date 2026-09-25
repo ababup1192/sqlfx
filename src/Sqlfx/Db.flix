@@ -60,6 +60,26 @@ pub mod Sqlfx.Db {
         }
 
     ///
+    /// `catchAll` の結果を元に戻す。`Err` の Throwable は同じ物を投げ直す（値にしない・包まない）。
+    ///
+    /// sqlfx が利用側の thunk を包んで handler を張る所は `run { Ok(catchAll(thunk)) } with handler …` と書き、
+    /// `run` を抜けてからこれを通す。thunk が外の handler へ op を投げた後で投げた物は、`run` の中で投げ直すと
+    /// 外側の catch（`Pool.withLazyTx` の `Db.guard`）を素通りするが、`run` を抜けた後なら届く。
+    ///
+    /// WhyNot: 投げ直しの IO を署名に出さないのは、投げるのは thunk が既に投げた物で、新しい副作用ではないため。
+    /// 出すと `Db.attempt` や `RawSql.runWithAllow` のような純粋な入口の型が全部変わる。
+    ///
+    pub def rethrowing(outcome: Result[Throwable, a]): a = match outcome {
+        case Ok(value)  => value
+        case Err(error) => unchecked_cast(throwAgain(error) as _ \ {})
+    }
+
+    ///
+    /// 投げる。
+    ///
+    def throwAgain(error: Throwable): a \ IO = throw error
+
+    ///
     /// 飲み込んではいけない物か。`VirtualMachineError`（OutOfMemoryError / InternalError）は true。
     /// 例外自身と、cause の連鎖を深さ 8 まで見る。
     ///

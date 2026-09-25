@@ -53,12 +53,14 @@ pub mod Sqlfx.DbErr {
     ///
     /// DbErr だけを Result に落とす。Transient は上へ流したまま、DbErr だけ値にしたいときに使う。
     /// 人が読む 1 行は `DbError.describe(kind)`。
+    /// thunk の中で投げた JVM の例外は `run` を抜けてから投げ直す（`Db.rethrowing`）。
     ///
     pub def runWithResult(thunk: Unit -> a \ ef): Result[DbErrorKind, a] \ ef - DbErr =
-        run {
-            Ok(thunk())
-        } with handler DbErr {
-            def raise(kind, _resume) = Err(kind)
-        }
+        let outcome = run {
+                Ok(Sqlfx.Db.catchAll(thunk))
+            } with handler DbErr {
+                def raise(kind, _resume) = Err(kind)
+            };
+        Result.map(Sqlfx.Db.rethrowing, outcome)
 
 }

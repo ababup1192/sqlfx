@@ -27,13 +27,15 @@ pub mod Sqlfx.TransientDbErr {
 
     ///
     /// TransientDbErr だけを Result に落とす。DbErr は上へ流したまま。withRetry が使う。
+    /// thunk の中で投げた JVM の例外は `run` を抜けてから投げ直す（`Db.rethrowing`）。
     ///
     pub def runWithResult(thunk: Unit -> a \ ef): Result[DbError.TransientKind, a] \ ef - TransientDbErr =
-        run {
-            Ok(thunk())
-        } with handler TransientDbErr {
-            def raise(kind, _resume) = Err(asTransient(kind))
-        }
+        let outcome = run {
+                Ok(Sqlfx.Db.catchAll(thunk))
+            } with handler TransientDbErr {
+                def raise(kind, _resume) = Err(asTransient(kind))
+            };
+        Result.map(Sqlfx.Db.rethrowing, outcome)
 
     ///
     /// TransientDbErr が運んできた kind の中身。
